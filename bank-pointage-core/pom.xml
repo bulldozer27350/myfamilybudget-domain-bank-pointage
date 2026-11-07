@@ -24,7 +24,7 @@
     <parent>
         <groupId>com.moe.myfamilybudget</groupId>
         <artifactId>domain-bank-pointage</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version>0.0.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
