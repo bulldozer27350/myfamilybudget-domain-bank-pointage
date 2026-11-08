@@ -1,0 +1,940 @@
+//// Fragment AsciiDoc sans titre de document : destiné à être inclus (include::) dans le
+//// document SRS consolidé de l'application MyFamilyBudget, avec un leveloffset ajusté
+//// par le document maître. Ne pas ajouter de ligne "= Titre" (niveau 0) dans ce fichier.
+////
+
+== Silo Pointage Banque — Exigences fonctionnelles et non fonctionnelles
+
+Ce chapitre couvre les exigences du silo *Banque/Pointage* (dépôt
+`myfamilybudget-domain-bank-pointage`, modules `bank-pointage-api` et `bank-pointage-core`) de
+l'application MyFamilyBudget. Le silo fournit trois moteurs : l'import et la catégorisation des
+transactions bancaires et des opérations en cours (`BankImportCalculationService`), le pointage
+mensuel des lignes budgétaires (`PointageCalculationService`), et la synchronisation DSP2 avec
+Enable Banking (`EnableBankingSyncService`). Contrairement au silo Analyse, ce silo porte aussi sa
+propre persistance JPA (voir `irs.adoc`) et un appel réseau sortant vers un tiers.
+
+=== Conventions
+
+Chaque exigence est identifiée par `MFB-POIN-RF-nnn` (exigence fonctionnelle) ou
+`MFB-POIN-NRF-nnn` (exigence non fonctionnelle), où :
+
+* `MFB` identifie l'application MyFamilyBudget (préfixe commun à tous les silos, pour une
+  concaténation homogène des exigences au niveau applicatif) ;
+* `POIN` identifie le silo Pointage Banque ;
+* `RF`/`NRF` identifie la nature de l'exigence ;
+* `nnn` est un numéro séquentiel sur 3 chiffres, propre à ce dépôt.
+
+**Critère RF / NRF.** Une exigence est *fonctionnelle* (RF) si elle décrit un comportement
+observable en boîte noire au travers de l'un des appels principaux exposés par ce silo —
+`BankImportCalculationService`, `PointageCalculationService` ou `EnableBankingSyncService` (une
+entrée donnée produit un résultat donné, ou un effet observable donné). Contrairement au silo
+Analyse, qui n'expose qu'un seul point d'entrée, ce silo en expose trois : le critère porte sur la
+nature de l'exigence (comportement métier observable via l'un de ces appels), pas sur le nombre de
+points d'entrée. Une exigence est *non fonctionnelle* (NRF) si elle porte sur un attribut de
+conception, de qualité ou de cycle de vie du composant (isolement architectural, build,
+versionnage, modularité...), indépendamment de ce critère de testabilité directe par appel.
+
+**Champ `Vérification::`.** Chaque exigence porte aussi sa méthode de vérification, selon la
+nomenclature **I/A/D/T** :
+
+[cols="1,3", options="header"]
+|===
+|Méthode |Définition retenue pour ce dépôt
+
+|*Inspection*
+|Examen direct d'un artefact (code source, fichier de configuration, type Java, documentation)
+sans exécution : il suffit de lire pour conclure.
+
+|*Analyse*
+|Raisonnement ou outillage statique appliqué au code ou aux artefacts compilés (graphe de
+dépendances, comparaison binaire `japicmp`, règle d'architecture type ArchUnit) sans exercer le
+comportement métier avec des données représentatives.
+
+|*Démonstration*
+|Exécution de l'ensemble (ou d'un pipeline) dans des conditions représentatives pour observer
+qu'il se comporte comme attendu, sans assertion exhaustive sur des données de test précises.
+
+|*Test*
+|Exécution contrôlée (appel à l'un des trois services, ou à un type du contrat) avec des données
+d'entrée connues, comparaison quantitative/qualitative du résultat obtenu à un résultat attendu.
+|===
+
+Une exigence non fonctionnelle peut très bien être vérifiée par Test, et une exigence dont la
+vérification exige une Inspection ou une Analyse n'est pas pour autant moins légitime : seule la
+méthode de preuve change, pas la nécessité de l'exigence.
+
+Chaque exigence comporte : un identifiant et un titre (en en-tête), un texte d'exigence, le cas
+échéant une note précisant un cas d'usage, sa méthode de vérification (`Vérification::`), et une
+ligne `Amont::` traçant la ou les exigences amont dont elle découle (ou `Aucune` si elle est
+propre à ce dépôt).
+
+=== Lecture et interprétation des données brutes (CSV, dates, montants)
+
+[#MFB-POIN-RF-001]
+==== MFB-POIN-RF-001 — Découpage d'un texte CSV en lignes de cellules
+
+`BankImportCalculationService.parseCSVText(text, delimiter)` découpe `text` en lignes de cellules
+selon `delimiter` (`;` par défaut si `null`/vide), gère les champs entre guillemets doubles (avec
+guillemet échappé `""`), traite `\r` comme un caractère ignoré et `\n` comme fin de ligne, et omet
+du résultat toute ligne dont toutes les cellules sont vides ou ne contiennent que des espaces. Une
+entrée `null` ou ne contenant que des espaces renvoie une liste vide.
+
+Vérification:: Test — couvert par `DefaultBankImportCalculationServiceTest` (CSV avec guillemets,
+CRLF, lignes vides).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-002]
+==== MFB-POIN-RF-002 — Interprétation d'une date saisie selon un format paramétrable
+
+`parseDateWithFormat(str, format)` convertit une date saisie en ISO `YYYY-MM-DD`. Si les trois
+parties séparées par `/`, `-` ou `.` commencent par un segment de 4 chiffres, ce segment est
+d'abord tenté comme une année ISO (`YYYY-MM-DD` ou `YYYY/MM/DD`), avant tout recours à `format` (à
+défaut, `DD/MM/YYYY`). Chaque composant du format (`D`, `M`, `Y`, insensible à la casse) indique la
+position du jour, du mois et de l'année ; une année sur 2 chiffres est ramenée au 21e siècle
+(`+2000`). Une date dont le jour, le mois ou l'année résultant est hors plage (jour 1-31, mois
+1-12, année 1900-2100), dont une partie n'est pas numérique, ou dont la chaîne ne comporte pas
+exactement 3 segments, renvoie `null` plutôt que de lever une exception.
+
+Vérification:: Test — formats français et ISO, dates invalides, année sur 2 chiffres.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-003]
+==== MFB-POIN-RF-003 — Interprétation d'un montant saisi (formats français ou anglais)
+
+`parseAmountText(str)` convertit un montant saisi en `BigDecimal` à 2 décimales
+(`RoundingMode.HALF_UP`). Le symbole `€` et les espaces sont retirés avant interprétation. Si la
+chaîne contient à la fois une virgule et un point, le dernier des deux rencontrés (le plus à
+droite) est traité comme séparateur décimal et l'autre comme séparateur de milliers ; si elle ne
+contient qu'une virgule, celle-ci est traitée comme séparateur décimal. Une entrée `null`, vide,
+ou numériquement illisible après normalisation renvoie `0,00` plutôt que de lever une exception.
+
+Vérification:: Test — formats `1 234,56`, `1,234.56`, `1234.56`, chaîne vide, chaîne invalide.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-004]
+==== MFB-POIN-RF-004 — Clé de déduplication d'une transaction ou d'une opération
+
+`transactionDedupeKey(date, label, amount)` produit une clé `date|libellé normalisé|centimes`, où
+le libellé est mis en minuscules, ses espaces successifs réduits à un seul, et recadré (`trim`) ;
+le montant est arrondi au centime le plus proche (`HALF_UP`) puis exprimé en centimes entiers. Une
+`date` ou un `label` `null` est traité comme une chaîne vide ; un `amount` `null` est traité comme
+zéro. Cette clé est le fondement de la déduplication d'import (voir MFB-POIN-RF-010 et
+MFB-POIN-RF-027).
+
+Vérification:: Test — libellés à casse/espacement différents produisant la même clé ; montants
+avec arrondi au centime.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-005]
+==== MFB-POIN-RF-005 — Dérivation d'une clé de règle de catégorisation depuis un libellé
+
+`ruleKeyFromLabel(label)` retire du libellé tous les chiffres, réduit les espaces successifs à un
+seul, recadre le résultat puis le met en majuscules. Un `label` `null` renvoie une chaîne vide.
+
+NOTE: Cette clé sert de base suggérée pour un mot-clé de règle de catégorisation ; elle n'est pas
+utilisée directement par `categorizeTransaction` (voir MFB-POIN-RF-008), qui reçoit son propre mot-
+clé en paramètre.
+
+Vérification:: Test — libellé avec numéro de carte ou de référence, assertion de la clé obtenue.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Règles de catégorisation automatique
+
+[#MFB-POIN-RF-006]
+==== MFB-POIN-RF-006 — Application des règles de catégorisation aux transactions
+
+`applyRulesToTransactions(transactions, rules)` laisse inchangée toute transaction déjà
+catégorisée (`categoryId` non vide). Pour une transaction non catégorisée, la première règle (dans
+l'ordre de la liste) dont le `matchText` (recadré, en majuscules) est contenu dans le libellé de la
+transaction (en majuscules) lui attribue sa `categoryId` ; les règles au `matchText` vide ou
+`null` sont ignorées. Une entrée `null` renvoie une liste vide.
+
+Vérification:: Test — règle correspondant par sous-chaîne insensible à la casse, plusieurs règles
+candidates (priorité à la première dans l'ordre de la liste), transaction déjà catégorisée
+inchangée.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-007]
+==== MFB-POIN-RF-007 — Application des règles de catégorisation aux opérations en cours
+
+`applyRulesToPendingOperations(operations, rules)` applique exactement la même règle que
+MFB-POIN-RF-006, sur les opérations en cours (`PendingOperationModel`) plutôt que sur les
+transactions.
+
+Vérification:: Test — mêmes scénarios que MFB-POIN-RF-006, appliqués aux opérations en cours.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-008]
+==== MFB-POIN-RF-008 — Catégorisation manuelle d'une transaction et mémorisation de règle
+
+`categorizeTransaction(txId, categoryId, ruleKeyword, transactions, rules)` affecte `categoryId` à
+la transaction `txId`. Si `ruleKeyword` est fourni (non vide après recadrage), une règle est créée
+ou mise à jour : la recherche d'une règle existante compare le `matchText` recadré et mis en
+majuscules à `ruleKeyword` recadré et mis en majuscules ; en cas de correspondance, la règle est
+remplacée (même identifiant, nouveau `matchText` recadré et nouvelle `categoryId`) ; sinon, une
+nouvelle règle est ajoutée. L'ensemble des règles (mises à jour) est ensuite réappliqué à
+*l'intégralité* des transactions fournies (MFB-POIN-RF-006) : la catégorisation manuelle peut donc
+re-catégoriser d'autres transactions partageant le même mot-clé, pas seulement `txId`. Une liste de
+transactions `null` renvoie un résultat vide, en conservant les règles fournies (ou une liste vide
+si elles sont `null`).
+
+Vérification:: Test — catégorisation avec et sans mot-clé, mise à jour d'une règle existante,
+répercussion sur d'autres transactions partageant le même libellé.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Import de transactions bancaires (CSV)
+
+[#MFB-POIN-RF-009]
+==== MFB-POIN-RF-009 — Rôles de colonnes obligatoires à l'import
+
+`importTransactions(rawRows, colRoles, mapping, existingTxs, rules)` exige un `colRoles` non
+`null` (sinon `IllegalArgumentException`) et qu'au moins les rôles `"date"`, `"label"` et
+`"amount"` y soient présents (sinon `IllegalArgumentException`) ; le rôle `"type"` est optionnel.
+
+Vérification:: Test — `colRoles` `null`, `colRoles` incomplet, assertion du message d'erreur.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-010]
+==== MFB-POIN-RF-010 — Déduplication des transactions importées par comptage de clé
+
+Pour chaque ligne brute valide (date interprétable, colonnes dans la plage de la ligne), la clé de
+déduplication (MFB-POIN-RF-004) est comparée au nombre d'occurrences déjà comptées pour cette clé
+(partant du nombre d'occurrences identiques dans `existingTxs`) : si le rang d'occurrence de la
+ligne dans le fichier ne dépasse pas ce compteur, la ligne est un doublon (ajoutée aux doublons
+ignorés) ; sinon elle est importée et le compteur de cette clé est incrémenté. Une transaction
+apparaissant deux fois dans le fichier, avec une seule occurrence déjà existante, est ainsi
+importée une fois (la seconde occurrence) et la première ignorée.
+
+Vérification:: Test — fichier avec doublons internes et doublons contre l'existant, assertion du
+nombre exact importé/ignoré.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-011]
+==== MFB-POIN-RF-011 — Lignes ignorées à l'import CSV
+
+Une ligne brute est silencieusement ignorée (ni importée, ni comptée en doublon) si l'index d'une
+colonne de rôle obligatoire dépasse la taille de la ligne, ou si la date de la colonne « date » ne
+peut être interprétée par MFB-POIN-RF-002 avec le format du mapping fourni (par défaut
+`DD/MM/YYYY`).
+
+Vérification:: Test — ligne tronquée, date illisible.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-012]
+==== MFB-POIN-RF-012 — Résultat de l'import et mapping de colonnes mis à jour
+
+`importTransactions` renvoie un `BankImportSummaryModel` portant : le nombre de transactions
+importées (après application des règles de catégorisation, MFB-POIN-RF-006), le nombre de
+doublons ignorés, le nombre de transactions auto-catégorisées, la liste des transactions
+dupliquées ignorées, la liste des nouvelles transactions importées (catégorisées), et le mapping de
+colonnes mis à jour (délimiteur et format de date repris de `mapping` fourni, ou valeurs par défaut
+`";"`/`"DD/MM/YYYY"` sinon ; indices de colonnes repris de `colRoles`, `typeCol` à `null` si absent).
+
+Vérification:: Test — assertion de chaque champ du résultat sur un jeu de lignes connu.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Ventilations (splits) d'une transaction
+
+[#MFB-POIN-RF-013]
+==== MFB-POIN-RF-013 — Validation de la cohérence d'une ventilation
+
+`BankTransactionModel.validateSplits()` ne lève aucune exception si la transaction ne porte aucune
+ventilation (liste `null` ou vide). Si des ventilations sont présentes, leur somme (montants `null`
+ignorés) est comparée au montant de la transaction : un écart (en valeur absolue) strictement
+supérieur à `0,01` € lève une `IllegalArgumentException` portant les deux montants en toutes
+lettres dans son message.
+
+Vérification:: Test — `DefaultBankImportCalculationServiceTest` (ventilation cohérente, écart
+d'un centime toléré, écart supérieur refusé).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-014]
+==== MFB-POIN-RF-014 — Équivalence de catégorisation entre deux entités
+
+`categorizationsMatch(categoryIdA, splitsA, categoryIdB, splitsB)` compare la catégorisation de
+deux entités (opération en cours, transaction) dans n'importe quel ordre. Si l'une a des
+ventilations et l'autre non, elles ne sont *jamais* équivalentes, même si la catégorie simple de
+l'autre est vide. Si les deux ont des ventilations, elles sont équivalentes si et seulement si
+l'ensemble des `categoryId` non vides de leurs ventilations (les montants ne sont volontairement
+pas comparés, l'opération en cours n'étant qu'une estimation) sont identiques. Si aucune n'a de
+ventilation, elles sont équivalentes si leurs `categoryId` simples (vide par défaut si `null`) sont
+égaux — deux entités sans aucune catégorisation sont donc considérées équivalentes.
+
+NOTE: Cette règle gouverne la décision de rapprochement automatique (MFB-POIN-RF-019 et
+MFB-POIN-RF-020) : toute différence de catégorisation, y compris « une catégorie d'un côté et
+aucune de l'autre », doit être arbitrée par l'opérateur plutôt que d'être devinée par l'application.
+
+Vérification:: Test — toutes les combinaisons (sans ventilation égales/différentes, avec
+ventilations identiques/différentes, mixte avec/sans ventilation).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-015]
+==== MFB-POIN-RF-015 — Remise à l'échelle des ventilations vers un montant cible
+
+`rescaleSplitsToAmount(splits, targetAmount)` ramène la somme des ventilations à `targetAmount` en
+conservant leur poids relatif, dès lors que leur somme actuelle n'est pas quasiment nulle (valeur
+absolue > `0,001`) et que l'écart à la cible n'est pas quasiment nul (> `0,001`) : chaque montant
+est multiplié par `targetAmount / somme actuelle` (division à 10 décimales, `HALF_UP`) puis arrondi
+à 2 décimales, et le reliquat d'arrondi (différence entre la cible et la nouvelle somme) est ajouté
+à la *dernière* ventilation de la liste. Hors de ces conditions (somme nulle, ou somme déjà égale à
+la cible), les montants sont conservés tels quels (`null` remplacé par zéro), sans mise à l'échelle.
+Une liste `splits` `null` ou vide renvoie une liste vide ; `targetAmount` `null` est traité comme
+zéro.
+
+Vérification:: Test — ventilations à poids inégaux remises à l'échelle, somme déjà égale à la
+cible (aucune mise à l'échelle), somme nulle.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-016]
+==== MFB-POIN-RF-016 — Nouvel identifiant systématique des ventilations remises à l'échelle
+
+Que la mise à l'échelle de MFB-POIN-RF-015 ait effectivement eu lieu ou non, chaque ventilation du
+résultat de `rescaleSplitsToAmount` porte un *nouvel* identifiant généré aléatoirement : l'identifiant
+d'origine n'est jamais conservé, y compris lorsque les montants ne sont pas modifiés.
+
+NOTE: Ce comportement diffère de la Javadoc de la méthode (« les identifiants sont conservés quand
+présents, générés sinon ») : chaque ventilation du résultat est construite avec un identifiant
+`null`, systématiquement remplacé par un nouvel identifiant aléatoire par le constructeur compact
+de `BankTransactionSplitModel`. Cette exigence documente le comportement réel du code, pas
+l'intention décrite par son commentaire.
+
+Vérification:: Test — comparaison des identifiants des ventilations avant/après l'appel, y compris
+dans le cas sans mise à l'échelle.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Rapprochement automatique des opérations en attente
+
+[#MFB-POIN-RF-017]
+==== MFB-POIN-RF-017 — Opérations déjà soldées laissées inchangées
+
+`autoMatchPendingOperations(pendingOps, transactions)` laisse inchangée toute opération en cours
+déjà au statut `"cleared"` (insensible à la casse) et déjà associée à une transaction
+(`linkedTxId` non vide) : elle n'est candidate à aucune nouvelle recherche de rapprochement.
+
+Vérification:: Test — opération déjà soldée non modifiée par un nouvel appel.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-018]
+==== MFB-POIN-RF-018 — Recherche de rapprochement par numéro de référence
+
+Pour une opération en cours dont `refNumber` recadré compte au moins 3 caractères, la première
+transaction (non déjà liée dans cet appel) dont le libellé (en minuscules) contient `refNumber` (en
+minuscules) et dont le montant absolu diffère de celui de l'opération de moins de `0,01` € (strict)
+est retenue comme candidate. Dès qu'une telle candidate est trouvée, la recherche par montant
+(MFB-POIN-RF-020) n'est *pas* tentée pour cette opération, que le rapprochement soit finalement
+validé (MFB-POIN-RF-019) ou non.
+
+Vérification:: Test — opération avec référence correspondant au libellé d'une transaction, dans la
+limite du seuil de montant.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-019]
+==== MFB-POIN-RF-019 — Décision de rapprochement ou de revue manuelle
+
+Une candidate trouvée (par référence, MFB-POIN-RF-018, ou par montant, MFB-POIN-RF-020) n'est
+rapprochée automatiquement (statut `"cleared"`, `linkedTxId` renseigné, `clearedDate` = date de la
+transaction trouvée) que si sa catégorisation et celle de l'opération sont équivalentes
+(MFB-POIN-RF-014) ; la transaction trouvée est alors marquée comme liée pour le reste de l'appel
+(elle ne peut plus être candidate pour une autre opération). Dans le cas contraire, le compteur de
+revues nécessaires (`needsReviewCount`) est incrémenté et l'opération reste inchangée, au statut
+`"pending"`, laissée au rapprochement manuel de l'opérateur.
+
+Vérification:: Test — catégorisations identiques (rapprochement effectif) et différentes (revue
+manuelle requise, opération non modifiée).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-020]
+==== MFB-POIN-RF-020 — Recherche de rapprochement par montant unique dans une fenêtre de 90 jours
+
+À défaut de candidate par référence, les transactions non liées dont le montant absolu diffère de
+moins de `0,01` € (strict) de celui de l'opération sont recherchées ; si la date de l'opération et
+celle d'une transaction candidate sont toutes deux interprétables, seules les transactions à 90
+jours ou moins de la date de l'opération sont retenues (une date non interprétable, côté opération
+ou côté transaction, désactive ce filtre de fenêtre pour cette paire). Le rapprochement automatique
+n'a lieu (voir MFB-POIN-RF-019) que si exactement une candidate subsiste : plusieurs candidates de
+même montant ne déclenchent *aucune* automatisation (l'opération reste `"pending"`, sans incrémenter
+`needsReviewCount`, à la différence du cas de désaccord de catégorisation).
+
+Vérification:: Test — montant unique dans la fenêtre (rapprochement), montant en dehors de la
+fenêtre (aucun rapprochement), plusieurs candidates de même montant (aucun rapprochement, aucune
+revue comptée).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-021]
+==== MFB-POIN-RF-021 — Alignement de la catégorisation de la transaction rapprochée
+
+Lorsqu'un rapprochement a lieu (MFB-POIN-RF-019) et que l'opération en cours porte des
+ventilations, la transaction bancaire correspondante voit sa catégorie simple vidée et ses
+ventilations remplacées par celles de l'opération, remises à l'échelle (MFB-POIN-RF-015) sur le
+montant réel de la transaction. Dans tous les autres cas (opération sans ventilation), la
+transaction bancaire rapprochée n'est pas modifiée : sa catégorisation, déjà équivalente à celle de
+l'opération (MFB-POIN-RF-014/019), reste la sienne.
+
+Vérification:: Test — rapprochement d'une opération ventilée, assertion des ventilations de la
+transaction résultante.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-022]
+==== MFB-POIN-RF-022 — Résultat du rapprochement automatique
+
+`autoMatchPendingOperations` renvoie un `AutoMatchResultModel` portant : le nombre d'opérations
+effectivement rapprochées, la liste complète (mise à jour) des opérations en cours, la liste
+complète des transactions (seules celles effectivement alignées en catégorisation,
+MFB-POIN-RF-021, diffèrent de l'entrée), et le nombre de paires candidates détectées mais laissées
+en revue manuelle. Une entrée `pendingOps` `null` renvoie un résultat vide (tous les compteurs à
+zéro, listes vides).
+
+Vérification:: Test — assertion de chaque champ du résultat sur un jeu de données mixte (certaines
+rapprochées, certaines en revue, certaines inchangées).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Import des opérations carte en attente (CB différée) et détection de doublons manuels
+
+[#MFB-POIN-RF-023]
+==== MFB-POIN-RF-023 — Détection de la date d'achat dans un libellé de carte différée
+
+`parsePurchaseDateFromLabel(label)` recherche dans le libellé le motif `"DU "` suivi de 6 à 8
+chiffres (jour, mois, année sur 2 ou 4 chiffres), insensible à la casse ; une année sur 2 chiffres
+est ramenée au 21e siècle (`+2000`). Un libellé `null`/vide, sans motif reconnu, ou dont le jour ou
+le mois extrait est hors plage (1-31/1-12), renvoie `null`.
+
+Vérification:: Test — libellé `"... DU 150324 ..."` et `"... DU 15032024 ..."`, libellé sans motif.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-024]
+==== MFB-POIN-RF-024 — Rôles de colonnes obligatoires à l'import d'opérations en cours
+
+`importPendingCB(rawRows, colRoles, dateFormat, usePurchaseDate, existingOps, rules)` exige, comme
+MFB-POIN-RF-009, un `colRoles` non `null` portant au moins les rôles `"date"`, `"label"` et
+`"amount"` (sinon `IllegalArgumentException` dans les deux cas).
+
+Vérification:: Test — `colRoles` `null` ou incomplet.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-025]
+==== MFB-POIN-RF-025 — Résolution de la date d'opération selon l'option « date d'achat »
+
+Pour chaque ligne, la date du relevé est d'abord interprétée avec `dateFormat` fourni (à défaut
+`DD-MM-YYYY`), puis, en cas d'échec, avec `DD/MM/YYYY`, puis avec `YYYY-MM-DD` ; si aucun de ces
+formats n'aboutit, la ligne est ignorée (MFB-POIN-RF-026). Si `usePurchaseDate` est vrai et qu'une
+date d'achat est détectée dans le libellé (MFB-POIN-RF-023), la date de l'opération devient la date
+d'achat et la date de débit attendue reste la date du relevé ; sinon, les deux dates valent la date
+du relevé, et si une date d'achat a tout de même été détectée (mais non utilisée, `usePurchaseDate`
+faux), une note `"Achat le JJ/MM/AAAA"` lui est associée.
+
+Vérification:: Test — ligne avec date d'achat et `usePurchaseDate` vrai/faux, assertion des dates
+et de la note produites.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-026]
+==== MFB-POIN-RF-026 — Lignes ignorées à l'import d'opérations en cours
+
+Une ligne brute est ignorée si une colonne de rôle obligatoire dépasse la taille de la ligne, si
+aucun format de date (MFB-POIN-RF-025) n'aboutit, ou si le libellé obtenu est vide après recadrage.
+
+Vérification:: Test — ligne tronquée, date illisible dans tous les formats essayés, libellé vide.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-027]
+==== MFB-POIN-RF-027 — Déduplication stricte des opérations en cours importées
+
+La déduplication par clé (MFB-POIN-RF-004, comptage d'occurrences contre l'existant puis contre le
+fichier lui-même) s'applique aux opérations en cours importées exactement comme à l'import de
+transactions (MFB-POIN-RF-010).
+
+Vérification:: Test — mêmes scénarios que MFB-POIN-RF-010, appliqués à `importPendingCB`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-028]
+==== MFB-POIN-RF-028 — Détection de doublons approximatifs avec les opérations manuelles
+
+Une opération importée (non retenue comme doublon strict) qui se trouve à au plus 1 jour (en
+valeur absolue, sur la date d'opération, lorsque les deux dates sont interprétables — sinon le
+filtre de date ne s'applique pas) et à au plus 10,00 € (en valeur absolue sur les montants absolus)
+d'au moins une opération manuelle existante (statut `"pending"`, non déjà liée à une transaction)
+est signalée comme candidate doublon (`DuplicateCandidateModel`, portant l'opération importée et la
+ou les opérations manuelles correspondantes) ; cette détection n'empêche pas l'opération d'être
+importée.
+
+Vérification:: Test — opération importée proche d'une saisie manuelle, assertion de la liste des
+candidats doublons produite en plus du résultat d'import.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-029]
+==== MFB-POIN-RF-029 — Catégorisation automatique et synthèse de l'import d'opérations en cours
+
+`importPendingCB` applique les règles de catégorisation (MFB-POIN-RF-007) aux opérations
+importées, puis renvoie un `PendingImportSummaryModel` portant le nombre importé, le nombre de
+doublons stricts ignorés, le nombre auto-catégorisé, la liste des doublons ignorés, la date de la
+première opération catégorisée (`null` si aucune), la liste des opérations importées catégorisées,
+et la liste des candidats doublons approximatifs (MFB-POIN-RF-028).
+
+Vérification:: Test — assertion de chaque champ du résultat sur un jeu de lignes connu.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Fusion d'une opération manuelle avec une opération bancaire détectée
+
+[#MFB-POIN-RF-030]
+==== MFB-POIN-RF-030 — Règles de fusion champ par champ
+
+`mergePendingOperation(manualOpId, bankOp, existingOps)` conserve l'identifiant de l'opération
+manuelle (`manualOpId`). Pour chaque champ : `categoryId` de l'opération manuelle est conservé s'il
+est renseigné, sinon celui de `bankOp` est repris ; `date`, `expectedDate`, `label` et `notes` sont
+repris de `bankOp` s'ils y sont renseignés (non vides après recadrage côté `bankOp`), sinon
+conservés de l'opération manuelle ; `amount` est repris de `bankOp` s'il est non `null`, sinon
+conservé ; les ventilations (`splits`) de l'opération manuelle sont conservées si non vides, sinon
+celles de `bankOp` sont reprises. Le `type` et le `refNumber` sont ceux de l'opération manuelle
+(valeurs par défaut `"cb"`/vide si absents) ; le statut résultant est toujours `"pending"`, et
+`linkedTxId`/`clearedDate` sont remis à `null`.
+
+Vérification:: Test — fusion avec et sans catégorie manuelle préexistante, avec et sans
+ventilations manuelles, assertion champ par champ du résultat.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-031]
+==== MFB-POIN-RF-031 — Suppression de l'opération bancaire déjà présente
+
+Si l'opération bancaire `bankOp` correspondait déjà à une entrée de `existingOps` (même
+identifiant), cette entrée est retirée du résultat : elle est fusionnée dans l'opération manuelle
+plutôt que dupliquée.
+
+Vérification:: Test — `existingOps` contenant à la fois l'opération manuelle et `bankOp`, assertion
+que le résultat ne contient qu'une seule entrée (la fusion).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-032]
+==== MFB-POIN-RF-032 — Entrée vide traitée comme absence d'opérations
+
+`mergePendingOperation` avec `existingOps` `null` renvoie une liste vide, sans lever d'exception.
+
+Vérification:: Test — appel avec `existingOps` `null`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Pointage mensuel
+
+[#MFB-POIN-RF-033]
+==== MFB-POIN-RF-033 — Filtrage des transactions d'un mois
+
+`filterTransactionsForMonth` (sur une liste de transactions et un mois ISO `YYYY-MM`, ou sur un
+`PointageInput`) ne retient que les transactions dont la date commence par le préfixe du mois
+donné. Une liste de transactions `null`, un mois `null`/vide, ou un `input` `null` renvoie une liste
+vide.
+
+Vérification:: Test — transactions de plusieurs mois, assertion du sous-ensemble retenu.
+
+Amont:: RF-500, RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-RF-034]
+==== MFB-POIN-RF-034 — Identifiants de transactions pointées sur les lignes actives
+
+`calculatePointedTxIds` (sur les liens d'un `MatchingModel`, sur une liste de
+`MatchingLinkModel`, ou sur un `PointageInput`) ne retient les identifiants de référence
+(`txId` ou `txId#splitId`) d'un lien que si la ligne budgétaire qu'il cible figure parmi les lignes
+actives fournies ; un lien ciblant une ligne absente des lignes actives n'apporte aucun identifiant
+pointé. Des liens `null`, des lignes actives `null`, ou un `input` `null` renvoient un ensemble vide.
+
+Vérification:: Test — lien ciblant une ligne active et un lien ciblant une ligne inactive/absente.
+
+Amont:: RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-RF-035]
+==== MFB-POIN-RF-035 — Résolution du montant d'une référence composite
+
+`resolveAmount(refId, txMap)` résout le montant d'une référence `txId#splitId` au montant de la
+ventilation `splitId` de la transaction `txId` (zéro si la transaction ou la ventilation est
+introuvable), et celui d'une référence simple `txId` au montant total de la transaction (zéro si
+introuvable). Une référence `null`/vide ou un `txMap` `null` renvoie zéro.
+
+Vérification:: Test — référence simple, référence composite, référence introuvable.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-036]
+==== MFB-POIN-RF-036 — Montant réel rapproché par ligne budgétaire
+
+`calculateRealByLine` (sur transactions + `MatchingModel`/liens + lignes actives, ou sur un
+`PointageInput`) calcule, pour chaque lien de rapprochement, la somme des montants résolus
+(MFB-POIN-RF-035) de ses références. Pour une ligne de nature `"revenu"`, cette somme est
+conservée telle quelle ; pour toute autre nature (`"charge"`, `"placement"`, ou nature inconnue —
+traitée par défaut comme `"charge"`), la somme est inversée de signe (un débit négatif devient un
+montant réel positif). Le résultat est arrondi à 2 décimales (`HALF_UP`). Des liens, lignes actives,
+ou transactions `null` renvoient une table vide.
+
+Vérification:: Test — ligne de nature revenu (signe conservé) et de nature charge/placement (signe
+inversé), avec référence composite.
+
+Amont:: RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-RF-037]
+==== MFB-POIN-RF-037 — Synthèse bancaire mensuelle (dépenses, revenus, non pointé)
+
+`calculateMonthBankSummary` (sur des transactions du mois + un ensemble d'identifiants pointés, ou
+sur un `PointageInput`) calcule : le total des dépenses (valeur absolue des montants négatifs) et
+le total des revenus (somme des montants positifs ou nuls) de toutes les transactions du mois,
+arrondis à 2 décimales. Pour une transaction sans ventilation, elle est comptée comme non pointée
+(incrémentant le compteur, et son montant en valeur absolue s'ajoutant aux dépenses non pointées si
+négatif) uniquement si son identifiant n'est pas dans l'ensemble pointé. Pour une transaction avec
+ventilations, chaque ventilation est considérée pointée si sa référence composite ou l'identifiant
+de la transaction entière figure dans l'ensemble pointé ; la transaction entière n'est comptée
+comme non pointée (une seule fois, quel que soit le nombre de ventilations non pointées) que si au
+moins une ventilation n'est pas pointée *et* que l'identifiant de la transaction entière n'y figure
+pas non plus ; le montant non pointé ajouté aux dépenses non pointées est alors le montant total de
+la transaction diminué de la somme des ventilations pointées, s'il est négatif. Une liste de
+transactions `null` renvoie une synthèse à zéro ; un ensemble d'identifiants pointés `null` est
+traité comme vide.
+
+Vérification:: Test — transaction sans ventilation pointée/non pointée, transaction ventilée
+partiellement pointée (comptée une fois), transaction ventilée pointée via son identifiant global.
+
+Amont:: RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-RF-038]
+==== MFB-POIN-RF-038 — Statut de pointage d'une ligne budgétaire
+
+`calculateLineStatus` (ligne + `MatchingModel`/liens/`PointageInput` + montant réel) renvoie le
+statut `"pending"` (montant réel à zéro, montant attendu et écart égaux au montant prévu de la
+ligne) si aucun lien ne cible cette ligne, ou si le lien existant n'a aucune référence. Sinon, une
+tolérance est calculée comme le maximum entre 2 % du montant prévu et 1,00 €, arrondie à 2
+décimales ; si l'écart absolu entre le montant réel (arrondi à 2 décimales) et le montant prévu
+(arrondi à 2 décimales) ne dépasse pas cette tolérance, le statut est `"match"`. Au-delà de la
+tolérance, pour une ligne de nature `"revenu"` ou `"placement"`, le statut est `"economy"` si le
+réel dépasse le prévu, sinon `"over"` ; pour toute autre nature (`"charge"` par défaut), le statut
+est `"economy"` si le réel est inférieur au prévu, sinon `"over"`. Le modèle renvoyé porte aussi le
+montant attendu, le montant réel (tous deux arrondis à 2 décimales) et leur différence signée
+(réel moins prévu). Une ligne `null` lève une `IllegalArgumentException`.
+
+Vérification:: Test — les quatre statuts (`pending`, `match`, `economy`, `over`) pour une ligne de
+charge et pour une ligne de revenu/placement, à la limite de la tolérance.
+
+Amont:: RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-RF-039]
+==== MFB-POIN-RF-039 — Enregistrement des rapprochements d'un mois
+
+`updateMatchingForMonth(currentImport, monthISO, newLinks)` remplace, dans l'import bancaire
+courant, le bloc de rapprochements du mois `monthISO` par un nouveau bloc portant `newLinks` (liste
+vide si `null`) ; les blocs des autres mois sont conservés inchangés. Un `monthISO` `null` ou vide
+lève une `IllegalArgumentException`. Un `currentImport` `null` est traité comme un import vide (le
+résultat ne porte alors que le bloc du mois mis à jour).
+
+Vérification:: Test — mise à jour du mois courant sans toucher aux autres mois, import de départ
+`null`.
+
+Amont:: RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+=== Synchronisation Enable Banking (DSP2)
+
+[#MFB-POIN-RF-040]
+==== MFB-POIN-RF-040 — Disponibilité déterminée une fois au démarrage
+
+`EnableBankingConfig.init()` détermine si la synchronisation est disponible
+(`EnableBankingSyncService.isConfigured()`) en vérifiant, dans l'ordre, que l'identifiant
+d'application, le chemin du certificat et la liste des comptes sont renseignés, que le fichier de
+certificat est lisible (et n'est pas un dossier), et que son contenu est un certificat PKCS#8
+RSA valide. Au premier défaut rencontré, la synchronisation est désactivée et un message explicatif
+précis (`unavailableReason()`), nommant la variable d'environnement ou la cause en défaut, est
+mémorisé.
+
+Vérification:: Test — `DefaultEnableBankingSyncServiceTest` et les tests dédiés d'`EnableBankingConfig`
+(chaque cause de désactivation produisant le message attendu).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-041]
+==== MFB-POIN-RF-041 — Refus de synchroniser sans configuration
+
+`EnableBankingSyncService.sync()` lève une `EnableBankingException` (portant le message
+d'indisponibilité, MFB-POIN-RF-040) sans accéder à aucun port (ni lecture de l'état de
+synchronisation, ni modification de l'import bancaire) lorsque `isConfigured()` est faux.
+
+Vérification:: Test — `DefaultEnableBankingSyncServiceTest.unconfigured_service_reports_reason_and_refuses_to_sync`
+(compteur d'accès aux ports resté à zéro).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-042]
+==== MFB-POIN-RF-042 — Isolation des comptes lors de la synchronisation
+
+`sync()` traite chaque compte configuré indépendamment des autres : une `EnableBankingException`
+levée lors de la récupération des transactions d'un compte (réseau, HTTP, consentement expiré) est
+rattrapée pour ce compte (son résultat porte le message d'erreur, aucun import n'a lieu pour lui) et
+n'empêche pas les comptes suivants d'être synchronisés.
+
+Vérification:: Démonstration — exécution avec plusieurs comptes dont un configuré pour échouer,
+observation des résultats des autres comptes.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-043]
+==== MFB-POIN-RF-043 — Fenêtre de récupération et filtre des opérations comptabilisées
+
+Pour chaque compte, seules les transactions au statut `"BOOK"` (comptabilisées) sont importées ;
+les opérations en attente (`"PDNG"`) sont ignorées par cette synchronisation (gérées par le module
+applicatif des opérations en cours). La date de départ de la récupération est la dernière date de
+comptabilisation connue pour ce compte, reculée de 3 jours (recouvrement de sécurité), ou absente
+(profondeur par défaut de la banque) lors de la toute première synchronisation du compte.
+
+NOTE: Le recouvrement de sécurité couvre le cas d'une transaction passée de « en attente » à
+« comptabilisée » avec une date légèrement différente ; les doublons qu'il peut réintroduire sont
+absorbés par la déduplication d'import (MFB-POIN-RF-010).
+
+Vérification:: Test — compte avec date de dernière synchronisation connue (date de départ reculée
+de 3 jours) et compte sans historique (aucune date de départ) ; Inspection du filtre de statut.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-044]
+==== MFB-POIN-RF-044 — Avancement non régressif de la date de synchronisation
+
+Après une synchronisation ayant importé au moins une transaction, la date de dernière
+synchronisation enregistrée pour le compte devient la plus récente entre la date déjà connue et la
+plus récente date de comptabilisation importée : elle ne recule jamais, même si la synchronisation
+n'a récupéré que des transactions plus anciennes que la date déjà connue.
+
+Vérification:: Test — synchronisation ne renvoyant que des transactions antérieures à la date déjà
+connue, assertion que la date enregistrée reste inchangée.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-045]
+==== MFB-POIN-RF-045 — Absence de résultat sans écriture ni erreur
+
+Si aucune transaction comptabilisée exploitable n'est récupérée pour un compte (liste vide après
+filtrage et mappage), aucune modification de l'import bancaire n'a lieu et le résultat du compte
+indique zéro import, zéro doublon, zéro catégorisation automatique, sans erreur.
+
+Vérification:: Test — réponse Enable Banking sans transaction comptabilisée.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-RF-046]
+==== MFB-POIN-RF-046 — Mappage d'une transaction Enable Banking vers une ligne d'import
+
+Une transaction Enable Banking (JSON) sans date de comptabilisation ni date de valeur, ou sans
+montant exploitable, n'est traduite en aucune ligne d'import (ignorée). Sinon : la date retenue est
+la date de comptabilisation (ou, à défaut, la date de valeur) ; le libellé est la concaténation
+(séparée par un espace) des éléments non vides de l'information de remise, ou, à défaut, la
+référence d'écriture, ou `"(sans libellé)"` si aucune des deux n'est disponible ; le montant est
+négatif si l'indicateur crédit/débit vaut `"DBIT"`, positif sinon ; le type est la description du
+code de transaction bancaire fournie par l'établissement si elle est présente et non vide, sinon
+déduit du libellé par une liste ordonnée de motifs reconnus (virement, prélèvement, carte, retrait,
+chèque, frais, cotisation, versement, intérêts), ou `"AUTRE"` si aucun motif ne correspond.
+
+Vérification:: Test — `EnableBankingTransactionMapperTest` (transaction sans date/montant,
+libellés avec et sans information de remise, chaque motif de déduction de type).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[[MFB-POIN-NFR-chapter]]
+=== Exigences non fonctionnelles
+
+[#MFB-POIN-NRF-001]
+==== MFB-POIN-NRF-001 — Isolement du silo Pointage Banque
+
+`bank-pointage-api` et `bank-pointage-core` ne dépendent, en compilation ni en exécution, d'aucun
+type appartenant à un autre silo métier de MyFamilyBudget (Budget, Analyse, Crédit...), ni du
+modèle persistant historique (`BudgetDataModel`, `PersistenceManager`). Le type
+`BudgetLineProjection` (voir `irs.adoc`, MFB-POIN-INT-009) est une forme neutre propre à ce dépôt :
+bien que son usage soit conceptuellement partagé avec le silo Analyse (RF-500/RF-600), il n'existe
+aucune dépendance de compilation entre les deux dépôts — chacun définit indépendamment son propre
+type de projection de ligne budgétaire.
+
+Vérification:: Analyse — examen du graphe de dépendances Maven déclarées (`bank-pointage-api/pom.xml`,
+`bank-pointage-core/pom.xml`) et des imports des sources Java (seuls des packages
+`com.moe.myfamilybudget.domain.bankpointage.*` sont importés depuis le code applicatif du silo).
+
+Amont:: SILO-154, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-NRF-002]
+==== MFB-POIN-NRF-002 — Pureté de `bank-pointage-api`
+
+`bank-pointage-api` ne déclare aucune dépendance de production ni de test : c'est un module
+purement JDK (contrats, ports, modèles), sans Spring, JPA, OpenAPI ni bibliothèque tierce.
+
+Vérification:: Inspection — lecture de `bank-pointage-api/pom.xml` (absence de section
+`<dependencies>`).
+
+Amont:: SILO-154 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-NRF-003]
+==== MFB-POIN-NRF-003 — Séparation API / implémentation et visibilité du composition root
+
+Le contrat (interfaces de service, modèles, ports) vit dans `bank-pointage-api` ; les moteurs
+(`DefaultBankImportCalculationService`, `DefaultPointageCalculationService`,
+`DefaultEnableBankingSyncService`) et les adaptateurs de persistance vivent dans
+`bank-pointage-core` et ne sont visibles et instanciables que depuis le composition root de
+l'application (module `server`) ; le module `application` ne dépend que de `bank-pointage-api`.
+
+Vérification:: Inspection — côté MyFamilyBudget (hors de ce dépôt), lecture de
+`application/pom.xml` et `server/pom.xml`.
+
+Amont:: SILO-154, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-NRF-004]
+==== MFB-POIN-NRF-004 — Persistance JPA autonome, sans lien avec le modèle historique
+
+`bank-pointage-core` porte sa propre persistance JPA (`BankImportDocumentEntity`,
+`EnableBankingSyncStateEntity`) : ces entités ne portent aucune relation JPA vers
+`BudgetDataEntity` ni vers aucune entité d'un autre silo. `BankImportDocumentEntity` est la racine
+d'un agrégat fonctionnellement singleton (une seule ligne en base, lue par
+`findFirstByOrderByIdAsc`), dont le contenu JSON reste une décision interne au silo (non éclaté en
+tables relationnelles).
+
+Vérification:: Inspection — lecture des entités JPA de `bank-pointage-core/.../persistence` (absence
+d'annotation `@ManyToOne`/`@OneToMany`/`@JoinColumn` vers une entité d'un autre module).
+
+Amont:: SILO-213, DB-1030 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-NRF-005]
+==== MFB-POIN-NRF-005 — Absence de `module-info` dans `bank-pointage-core`
+
+Contrairement à `bank-pointage-api` (voir `irs.adoc`, MFB-POIN-INT-023), `bank-pointage-core` ne
+déclare pas de `module-info.java` (décision D3 du silo) : sa visibilité vis-à-vis du reste de
+l'application est tenue par le graphe de dépendances Maven et par une règle d'architecture
+(ArchUnit), pas par le système de modules JPMS.
+
+Vérification:: Inspection — absence du fichier `bank-pointage-core/src/main/java/module-info.java`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-006]
+==== MFB-POIN-NRF-006 — Non-exposition du certificat Enable Banking
+
+Le code de ce silo ne lit jamais le certificat Enable Banking autrement que par un chemin de
+fichier fourni en configuration (`EnableBankingConfig`) : le contenu du certificat n'est jamais
+intégré au code source, ni journalisé, ni exposé par un modèle de l'API.
+
+Vérification:: Inspection — revue de `EnableBankingConfig`/`EnableBankingJwtSigner` (lecture du
+certificat exclusivement via `Files.readString` sur le chemin fourni, absence de toute valeur de
+certificat en dur).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-007]
+==== MFB-POIN-NRF-007 — Génération locale et sans état du jeton Enable Banking
+
+Le jeton JWT d'authentification auprès d'Enable Banking est généré localement (signature RSA
+`SHA256withRSA` par le JDK, sans bibliothèque JWT tierce) à chaque appel HTTP, sans mise en cache ni
+appel réseau pour son obtention : `EnableBankingJwtSigner` ne porte aucun état mutable au-delà de la
+clé privée déjà chargée.
+
+Vérification:: Inspection — lecture de `EnableBankingJwtSigner`/`EnableBankingClient` (absence de
+champ de cache de jeton, génération systématique à chaque appel à `issueToken()`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-008]
+==== MFB-POIN-NRF-008 — Stabilité binaire de l'API publiée
+
+Toute évolution binaire incompatible et non souhaitée des classes publiées de `bank-pointage-api`
+fait échouer le build (`japicmp-maven-plugin`, `breakBuildOnBinaryIncompatibleModifications`).
+
+Vérification:: Analyse — comparaison binaire outillée (`japicmp-maven-plugin`) entre la version
+publiée précédente et la version en cours de build.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-009]
+==== MFB-POIN-NRF-009 — Environnement de compilation
+
+Le dépôt compile en Java 21 (`maven.compiler.release = 21`), encodage source et rapport imposé en
+UTF-8.
+
+Vérification:: Inspection — lecture des propriétés de `pom.xml`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-010]
+==== MFB-POIN-NRF-010 — Versionnage SemVer et cycle SNAPSHOT/release
+
+Le dépôt respecte SemVer 2.0.0 strict (`x.y.z`, jamais de range ni de `LATEST`/`RELEASE`). En
+continu, `pom.xml` reste en `x.y.z-SNAPSHOT` et chaque push sur `main` republie ce SNAPSHOT sur
+GitHub Packages (job `publish-snapshot`) ; une release n'est produite que par la pose d'un tag
+`vX.Y.Z` (job `release`), avec garde-fou bloquant si la version du `pom.xml` est encore en SNAPSHOT
+ou ne correspond pas exactement au tag.
+
+Vérification:: Démonstration — exécution du pipeline `ci.yml` sur un push `main` et sur la pose
+d'un tag `vX.Y.Z`, observation des garde-fous et de la publication effective sur GitHub Packages.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-011]
+==== MFB-POIN-NRF-011 — Non-réécriture d'une version publiée
+
+Une version déjà publiée sur GitHub Packages n'est jamais republiée ni corrigée en place ; toute
+anomalie post-publication donne lieu à une nouvelle version corrective (tags `v*` protégés contre
+suppression et déplacement, GitHub Ruleset `protect-release-tags`).
+
+Vérification:: Inspection — vérification de la configuration du GitHub Ruleset
+`protect-release-tags` sur le dépôt.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-012]
+==== MFB-POIN-NRF-012 — Documentation d'exigences au format AsciiDoc
+
+Les exigences fonctionnelles et non fonctionnelles de ce silo sont documentées dans ce fichier
+(`doc/srs.adoc`), sous forme de fragment sans titre de document, afin d'être concaténées sans
+retraitement dans le SRS consolidé de l'application (`include::`, avec ajustement de
+`leveloffset` par le document maître) et de servir de base à la génération d'une matrice de
+traçabilité exigences ↔ tests.
+
+Vérification:: Inspection — lecture du fichier, vérification de l'absence de titre de document de
+niveau 0 (`= ...`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-013]
+==== MFB-POIN-NRF-013 — Unicité des identifiants d'exigence
+
+Chaque identifiant `MFB-POIN-RF-nnn` / `MFB-POIN-NRF-nnn` est unique dans ce dépôt et ne doit
+jamais être réutilisé pour une exigence différente, y compris après suppression d'une exigence
+obsolète (le numéro est alors retiré, jamais réaffecté).
+
+Vérification:: Inspection — revue du fichier, absence de doublon d'ancre/identifiant.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-NRF-014]
+==== MFB-POIN-NRF-014 — Cohérence du préfixe applicatif
+
+Le préfixe `MFB-` est commun à l'ensemble des silos de l'application (dépôt `MyFamilyBudget` et ses
+onze dépôts satellites) afin que la concaténation de leurs exigences respectives au niveau
+applicatif produise un espace d'identifiants homogène et sans collision.
+
+Vérification:: Inspection — revue croisée des identifiants utilisés dans les `srs.adoc`/`irs.adoc`
+des différents dépôts satellites, au moment de leur concaténation.
+
+Amont:: Aucune (exigence propre à ce dépôt)

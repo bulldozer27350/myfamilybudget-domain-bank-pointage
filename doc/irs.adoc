@@ -1,0 +1,532 @@
+//// Fragment AsciiDoc sans titre de document : destiné à être inclus (include::) dans le
+//// document IRS consolidé de l'application MyFamilyBudget, avec un leveloffset ajusté
+//// par le document maître. Ne pas ajouter de ligne "= Titre" (niveau 0) dans ce fichier.
+////
+
+== Silo Pointage Banque — Interface avec l'application MyFamilyBudget (IRS)
+
+Ce chapitre spécifie l'interface entre l'application MyFamilyBudget (modules `application` et
+`server`, ce dernier étant le composition root) et le silo Pointage Banque (dépôt
+`myfamilybudget-domain-bank-pointage`). Contrairement au silo Analyse, cette interface n'est pas à
+sens unique : outre les trois interfaces de service que l'application appelle, ce silo définit des
+ports que l'application doit implémenter ou satisfaire (persistance, verrouillage), publie un
+événement applicatif, et effectue lui-même un appel réseau sortant vers un tiers (Enable Banking)
+indépendant de l'application. Ce chapitre décrit la nature de chacune de ces interactions, les
+données échangées et leur format, ainsi que le contrat de build et de compatibilité qui les
+gouverne.
+
+=== Conventions
+
+Les exigences d'interface de ce chapitre sont identifiées `MFB-POIN-INT-nnn` (`INT` pour
+interface), afin de ne pas être confondues avec les exigences fonctionnelles (`RF`) ou non
+fonctionnelles (`NRF`) du `srs.adoc` de ce même dépôt, tout en conservant le même préfixe
+applicatif `MFB-POIN-` pour une concaténation homogène. Chaque exigence comporte un identifiant et
+un titre, un texte, le cas échéant une note, sa méthode de vérification (`Vérification::`, voir la
+nomenclature Inspection/Analyse/Démonstration/Test définie dans `srs.adoc`), et une ligne
+`Amont::`.
+
+Certaines exigences de ce chapitre portent sur un comportement attendu côté application
+(responsabilités de traduction, de câblage ou de verrouillage) : leur preuve ne se trouve pas dans
+ce dépôt mais dans celui de MyFamilyBudget. La ligne `Vérification::` le précise explicitement dans
+ce cas.
+
+=== Nature de l'interface
+
+[#MFB-POIN-INT-001]
+==== MFB-POIN-INT-001 — Appel Java direct pour les trois interfaces de service
+
+L'interaction entre l'application et les interfaces `BankImportCalculationService`,
+`PointageCalculationService` et `EnableBankingSyncService` est, du point de vue de l'application,
+un appel de méthode Java direct, dans le même processus et la même JVM, sans sérialisation
+(JSON, XML ou autre) à cette frontière : les objets échangés sont des instances Java (records
+immuables, pour l'essentiel) passées par référence.
+
+NOTE: `EnableBankingSyncService.sync()` déclenche lui-même, en interne, un véritable appel réseau
+HTTP vers un tiers (Enable Banking) — voir MFB-POIN-INT-017 — mais ce réseau est invisible de
+l'appelant applicatif : du point de vue de l'interface avec MyFamilyBudget, l'appel reste
+synchrone et direct, comme pour les deux autres interfaces.
+
+Vérification:: Inspection — lecture du code de `bank-pointage-api` (types Java échangés par
+référence) et de son `pom.xml` (absence de dépendance de sérialisation réseau).
+
+Amont:: SILO-154 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-002]
+==== MFB-POIN-INT-002 — Sens de l'appel selon le type d'interface
+
+L'application appelle les trois interfaces de service du silo ; celles-ci n'appellent jamais, en
+retour, de code de l'application ou d'un autre silo métier (aucun callback déclaré par
+`bank-pointage-api` sur ces interfaces). Le sens est en revanche *inversé* pour les ports de
+persistance et de modification atomique (`BankReader`, `BankWriter`, `BankSnapshotWriter`,
+`BankImportModifier`, `EnableBankingSyncStateStore`) : ce sont des interfaces déclarées par ce
+dépôt mais dont une partie des implémentations provient de l'application (voir
+MFB-POIN-INT-012 à MFB-POIN-INT-014).
+
+Vérification:: Inspection — revue des signatures de `bank-pointage-api` : aucune interface de
+callback orientée application sur les trois interfaces de service ; les ports du package `port`
+n'ont pas cette contrainte.
+
+Amont:: SILO-133, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-003]
+==== MFB-POIN-INT-003 — Appel synchrone et bloquant
+
+Chaque méthode des trois interfaces de service est un appel synchrone : elle renvoie son résultat
+complet directement, sans `Future`, sans callback asynchrone, et sans état intermédiaire observable
+par l'appelant pendant le calcul — y compris `EnableBankingSyncService.sync()`, qui bloque le temps
+des appels réseau sortants qu'il effectue.
+
+Vérification:: Inspection — lecture des signatures des trois interfaces (types de retour directs,
+absence de `Future`/`CompletableFuture`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-INT-004]
+==== MFB-POIN-INT-004 — Effets de bord différenciés selon l'interface
+
+`BankImportCalculationService` et `PointageCalculationService` sont des fonctions pures : elles ne
+lisent ni n'écrivent aucune donnée persistante et leur résultat ne dépend que de leur entrée.
+`EnableBankingSyncService`, à l'inverse, a des effets de bord propres au silo : il effectue un appel
+réseau vers un tiers, lit et écrit l'état de persistance du silo (via les ports), et déclenche la
+publication d'un événement applicatif (MFB-POIN-INT-015) — à la différence du silo Analyse, qui
+n'a par construction aucune de ces trois interfaces à effet de bord.
+
+Vérification:: Analyse — revue du code de `DefaultBankImportCalculationService` et
+`DefaultPointageCalculationService` (absence de champ d'instance mutable, absence d'accès
+disque/réseau/BD) ; revue de `DefaultEnableBankingSyncService` (dépendances vers
+`EnableBankingClient`, `BankImportModifier`, `EnableBankingSyncStateStore`).
+
+Amont:: SILO-133, SILO-170, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Points d'entrée exposés
+
+[#MFB-POIN-INT-005]
+==== MFB-POIN-INT-005 — Trois interfaces de service exposées
+
+Le silo expose trois points d'entrée, tous dans `bank-pointage-api` (package `calculation`) :
+`BankImportCalculationService` (import bancaire, opérations en cours, règles de catégorisation),
+`PointageCalculationService` (pointage mensuel) et `EnableBankingSyncService` (synchronisation
+DSP2), chacun décrit en détail dans `srs.adoc`.
+
+Vérification:: Inspection — revue du package `calculation` de `bank-pointage-api` : exactement
+trois interfaces de service y sont déclarées.
+
+Amont:: SILO-154, SILO-170 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-006]
+==== MFB-POIN-INT-006 — Implémentations non visibles de l'application
+
+`DefaultBankImportCalculationService`, `DefaultPointageCalculationService` et
+`DefaultEnableBankingSyncService` (module `bank-pointage-core`) ne sont visibles et instanciables
+que depuis le composition root de l'application (module `server`) ; le module `application` ne
+connaît et ne dépend que des interfaces et des types portés par `bank-pointage-api`.
+
+Vérification:: Inspection — côté MyFamilyBudget (hors de ce dépôt), lecture de
+`application/pom.xml` (absence de dépendance vers `bank-pointage-core`).
+
+Amont:: SILO-154, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-007]
+==== MFB-POIN-INT-007 — Câblage par le composition root et orchestration applicative
+
+Le composition root déclare les beans portant les trois moteurs (non annotés `@Component` côté
+`bank-pointage-core` : leur câblage est explicite, par une classe de configuration dédiée) ainsi
+que les adaptateurs de persistance (`JpaBankStore`, `JpaEnableBankingSyncStateStore`, annotés
+`@Component`, découverts par le scan Spring Boot par défaut). Côté MyFamilyBudget, le point
+d'orchestration applicatif (`BankPointageUseCase`/`DefaultBankPointageUseCase`, issu de R-83/
+SILO-314) manipule directement les types exposés par ce dépôt (`BankImportModel`, `PointageInput`,
+etc.), sans DTO applicatif intermédiaire dédié — à la différence d'autres silos (ex. Trésorerie).
+
+Vérification:: Inspection — côté MyFamilyBudget (hors de ce dépôt), lecture de la classe de
+configuration du composition root déclarant les beans des moteurs, et du code de
+`BankPointageUseCase`/`DefaultBankPointageUseCase`.
+
+Amont:: SILO-154, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`) ; R-83/
+SILO-314 (MyFamilyBudget, `24-backlog-reste-a-faire.md`)
+
+=== Modèle de données échangé
+
+[#MFB-POIN-INT-008]
+==== MFB-POIN-INT-008 — Structure du contrat `BankImportModel`
+
+`BankImportModel` est le document bancaire complet échangé avec l'application :
+
+[cols="1,2,3", options="header"]
+|===
+|Champ |Type |Description
+
+|`columnMapping`
+|`BankColumnMappingModel`
+|Mapping de colonnes CSV courant (délimiteur, format de date, en-tête, indices de colonnes) ;
+valeur par défaut `(";", "DD/MM/YYYY", true, null, null, null, null)` si `null`
+
+|`categories`
+|`List<CategoryModel>`
+|Catégories bancaires (id, libellé, nature `"Dépense"`/`"Revenu"`, compressible `"Oui"`/`"Non"`)
+
+|`rules`
+|`List<BankImportRuleModel>`
+|Règles de catégorisation automatique (id, `matchText`, `categoryId`)
+
+|`transactions`
+|`List<BankTransactionModel>`
+|Transactions bancaires (id, date ISO, libellé, type, montant signé, catégorie, ventilations)
+
+|`pendingOperations`
+|`List<PendingOperationModel>`
+|Opérations en cours (carte différée, virements à venir...)
+
+|`matchings`
+|`List<MatchingModel>`
+|Rapprochements ligne budgétaire ↔ transactions, un élément par mois pointé
+|===
+
+Chaque champ transmis `null` est remplacé par une liste vide (sauf `columnMapping`, remplacé par sa
+valeur par défaut) : l'application n'a pas à garantir l'absence de `null` sur la structure de
+premier niveau.
+
+Vérification:: Test — `DefaultBankImportCalculationServiceTest` et tests de `BankImportModel`
+(valeurs par défaut).
+
+Amont:: RF-500 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-INT-009]
+==== MFB-POIN-INT-009 — Sous-structures du contrat d'import bancaire
+
+[cols="1,2", options="header"]
+|===
+|Type |Champs et format
+
+|`BankTransactionModel`
+|`id` (généré si absent), `date` (ISO `YYYY-MM-DD`), `label`, `type`, `amount` (`BigDecimal`
+signé, négatif pour un débit), `categoryId`, `splits` (`List<BankTransactionSplitModel>`)
+
+|`BankTransactionSplitModel`
+|`id` (généré si absent), `categoryId`, `amount` (`BigDecimal` signé), `label`
+
+|`PendingOperationModel`
+|`id` (généré si absent), `date`, `expectedDate` (= `date` si absent), `type` (`"cb"` par défaut),
+`refNumber`, `label`, `amount` (zéro si absent, non recadré à l'échelle 2 par le record lui-même),
+`categoryId`, `status` (`"pending"` par défaut), `linkedTxId`, `clearedDate`, `notes`, `splits`,
+`budgetLineId`
+
+|`CategoryModel`
+|`id` (généré si absent), `label`, `kind` (`"Dépense"` par défaut), `compressible` (`"Non"` par
+défaut)
+
+|`BankImportRuleModel`
+|`id` (généré si absent), `matchText`, `categoryId`
+
+|`MatchingModel`
+|`month` (`YYYY-MM`), `links` (`List<MatchingLinkModel>`)
+
+|`MatchingLinkModel`
+|`budgetLineId`, `txIds` (`List<String>`, chaque élément `txId` ou `txId#splitId`)
+|===
+
+NOTE: Contrairement aux autres montants du silo (voir MFB-POIN-INT-011), `PendingOperationModel.amount`
+n'est pas mis à l'échelle de 2 décimales par le constructeur compact du record : seule sa valeur
+`null` est remplacée par zéro, sans appel à `setScale`.
+
+Vérification:: Test — couvert par les tests de `BankImportModel` et des services du silo.
+
+Amont:: RF-500 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-INT-010]
+==== MFB-POIN-INT-010 — Contrat d'entrée du pointage (`PointageInput`)
+
+`PointageInput` est le contrat d'entrée du moteur de pointage (RF-501) : il ne reçoit plus de
+charges, revenus, placements ni paramètres bruts, mais des lignes budgétaires déjà composées.
+
+[cols="1,2,3", options="header"]
+|===
+|Champ |Type |Description
+
+|`transactions`
+|`List<BankTransactionModel>`
+|Transactions bancaires prises en compte (type réutilisé de `BankImportModel`)
+
+|`matchings`
+|`List<MatchingLinkModel>`
+|Liens de rapprochement du mois pointé (type réutilisé de `BankImportModel`)
+
+|`activeBudgetLines`
+|`List<BudgetLineProjection>`
+|Lignes budgétaires actives pour `period`, composées en amont par l'application
+
+|`period`
+|`PointagePeriod(String monthISO)`
+|Mois pointé, format `YYYY-MM`
+|===
+
+`BudgetLineProjection(id, label, kind, monthly, categoryId)` est une forme neutre : `kind` vaut
+`"charge"`, `"revenu"` ou `"placement"` ; `monthly` est arrondi à 2 décimales (`HALF_UP`), zéro si
+`null`. Chaque champ non transmis (`null`) de `PointageInput` est remplacé par une liste vide ou une
+`PointagePeriod("")`.
+
+Vérification:: Test — `PointageInputTest` (structure et valeurs par défaut).
+
+Amont:: RF-500, RF-501 (MyFamilyBudget, `doc/architecture/07-domaine-banque-pointage.md`)
+
+[#MFB-POIN-INT-011]
+==== MFB-POIN-INT-011 — Arrondi et échelle des montants en sortie
+
+Tout `BigDecimal` restitué par les modèles de résultat du silo (`PointageMonthSummaryModel`,
+`PointageLineStatusModel`, et les montants calculés par `calculateRealByLine`) est arrondi à 2
+décimales, mode `HALF_UP`. Font exception les montants transitant tels quels dans les listes
+d'entités du document d'import (`BankTransactionModel.amount`, `PendingOperationModel.amount`,
+voir MFB-POIN-INT-009) : leur échelle dépend de ce qui a été fourni en entrée (l'arrondi n'est
+garanti qu'au moment du calcul, par `parseAmountText`, MFB-POIN-RF-003, ou par les opérations
+arithmétiques des moteurs).
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Persistance du silo (ports et adaptateurs)
+
+[#MFB-POIN-INT-012]
+==== MFB-POIN-INT-012 — Persistance de l'import bancaire implémentée dans ce dépôt
+
+Contrairement au silo Analyse (sans aucune persistance), les ports `BankReader`, `BankWriter` et
+`BankSnapshotWriter` sont implémentés *dans ce dépôt* par `JpaBankStore`
+(`bank-pointage-core/.../persistence`), sur la table `bank_import_document` : lecture (un document
+vide restitué en l'absence d'enregistrement, jamais `null`), remplacement intégral à chaque
+écriture (suppression puis insertion, avec `flush` intermédiaire), et réinitialisation. Un import
+`null` passé à `updateBankImport` est ignoré sans écriture ni événement ; un import `null` passé à
+`replace` est accepté (table vidée). Ces adaptateurs ne portent eux-mêmes ni verrou ni annotation
+`@Transactional` : ils ne sont appelés que dans une transaction déjà ouverte par l'appelant, après
+prise du verrou de mutation du silo (voir MFB-POIN-INT-020).
+
+Vérification:: Inspection — lecture de `JpaBankStore` ; Test — côté MyFamilyBudget (hors de ce
+dépôt), tests d'intégration exerçant ces ports au travers du composition root.
+
+Amont:: SILO-119, SILO-213, DB-1030, DB-1031 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-013]
+==== MFB-POIN-INT-013 — État de synchronisation Enable Banking implémenté dans ce dépôt
+
+Le port `EnableBankingSyncStateStore` est implémenté dans ce dépôt par
+`JpaEnableBankingSyncStateStore`, sur la table `enable_banking_sync_state` (une ligne par
+`account_uid`, remplacée à chaque synchronisation).
+
+Vérification:: Inspection — lecture de `JpaEnableBankingSyncStateStore`.
+
+Amont:: SILO-170, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-014]
+==== MFB-POIN-INT-014 — Modification atomique implémentée par l'application (sens inversé)
+
+Le port `BankImportModifier`, consommé par `DefaultEnableBankingSyncService` (module
+`bank-pointage-core`), est *implémenté par le composition root* de l'application
+(`BankImportCommandService`, hors de ce dépôt) : c'est l'unique dépendance de ce silo vers un type
+dont l'implémentation lui est extérieure. L'implémentation lit l'import bancaire sous le verrou de
+mutation du silo, applique la fonction de modification reçue, puis écrit le résultat (aucune
+écriture si `BankImportChange.updatedImport()` est `null`), le tout en une seule unité de travail :
+aucune lecture, modification et réécriture en trois temps séparés qui perdrait une écriture
+concurrente. Une exception levée par la fonction de modification annule l'unité de travail sans
+rien écrire et se propage telle quelle à l'appelant.
+
+Vérification:: Inspection (signature du port, revue de `DefaultEnableBankingSyncService`) complétée
+par un Test côté MyFamilyBudget (hors de ce dépôt) de `BankImportCommandService`.
+
+Amont:: SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-015]
+==== MFB-POIN-INT-015 — Événement applicatif après chaque écriture
+
+Chaque écriture effectuée par `JpaBankStore` (`updateBankImport`, `replace`, `reset`) publie un
+`BankImportMutatedEvent` (portant la nature de l'écriture, à but diagnostique) via
+`ApplicationEventPublisher` ; son écoute après le commit de la transaction en cours, côté
+composition root, déclenche le contrôle automatique des notifications applicatives — règle
+héritée de l'ancien `BudgetMutatedEvent` du `PersistenceManager`, conservée depuis que l'import
+bancaire s'écrit directement dans sa propre table.
+
+Vérification:: Inspection — lecture de `JpaBankStore` (appel à `eventPublisher.publishEvent`) ;
+Test côté MyFamilyBudget (hors de ce dépôt) de l'écouteur après commit.
+
+Amont:: SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-016]
+==== MFB-POIN-INT-016 — Schéma de base de données propre au silo (Liquibase)
+
+Les tables `bank_import_document` et `enable_banking_sync_state` sont créées et évoluées par un
+changelog Liquibase propre à ce dépôt
+(`bank-pointage-core/src/main/resources/db/changelog/bank-pointage-core/bank-pointage-core.changelog.xml`),
+sans reverse-engineering d'un schéma existant (baseline générée sur base neuve, R-01). Le champ
+`json_data` de `bank_import_document` est mappé via `@JdbcTypeCode(SqlTypes.LONG32VARCHAR)` (et
+non `@Lob`) : `text` en DDL PostgreSQL, `clob` en DDL H2, lecture/écriture en chaîne ordinaire,
+jamais via Large Object (évite le besoin d'une connexion non-autocommit en lecture).
+
+Vérification:: Inspection — lecture du changelog Liquibase et de l'annotation de
+`BankImportDocumentEntity.jsonData`.
+
+Amont:: R-01 (MyFamilyBudget, `24-backlog-reste-a-faire.md`) ; DB-1030 (MyFamilyBudget,
+`doc/architecture/21-plan-silotage.md`)
+
+=== Intégration externe Enable Banking (tiers DSP2)
+
+[#MFB-POIN-INT-017]
+==== MFB-POIN-INT-017 — Appel HTTP sortant propre au silo, hors interface applicative
+
+`EnableBankingSyncService.sync()` déclenche, en interne à `bank-pointage-core`, des appels HTTP
+sortants vers l'API Enable Banking (soldes puis transactions, avec authentification par JWT RS256
+signé localement, et pagination par `continuation_key`) : ce réseau est un détail d'implémentation
+du silo, invisible de l'interface avec l'application (voir MFB-POIN-INT-001). La configuration
+(identifiant d'application, chemin du certificat, liste de comptes au format
+`libellé 1|uid-1;libellé 2|uid-2;...`, URL de base de l'API, délai d'expiration) est fournie par le
+composition root au démarrage (propriétés Spring / variables d'environnement), hors de ce dépôt ;
+l'absence de configuration ne bloque pas le démarrage de l'application (voir `srs.adoc`,
+MFB-POIN-RF-040).
+
+Vérification:: Inspection — lecture de `EnableBankingClient`, `EnableBankingConfig` et
+`EnableBankingAccounts` ; Démonstration côté MyFamilyBudget (hors de ce dépôt) de la configuration
+effective en environnement de production.
+
+Amont:: SILO-170 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Responsabilités de traduction côté application
+
+[#MFB-POIN-INT-018]
+==== MFB-POIN-INT-018 — Composition des lignes budgétaires actives
+
+L'application compose, pour le mois pointé, les lignes budgétaires actives des silos Charge/
+Revenu/Placement et les traduit vers `BudgetLineProjection`, avant tout appel à une méthode de
+`PointageCalculationService` prenant un `PointageInput` ou une liste de `BudgetLineProjection`.
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt), tests de la Factory
+applicative responsable de cette composition.
+
+Amont:: SILO-133, SILO-154 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-019]
+==== MFB-POIN-INT-019 — Déclenchement du rapprochement et absence de DTO applicatif dédié
+
+Le déclenchement du rapprochement automatique, de l'enregistrement manuel d'un pointage mensuel, et
+des imports CSV (depuis le front) reste de la responsabilité de l'application : ce silo ne reçoit
+et n'expose aucune route HTTP ni DTO REST propre. Comme indiqué en MFB-POIN-INT-007, l'orchestration
+applicative manipule directement les modèles de ce dépôt, sans DTO de traduction dédié.
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt), tests du contrôleur REST et
+de `BankPointageUseCase`/`DefaultBankPointageUseCase`.
+
+Amont:: SILO-213, R-83/SILO-314 (MyFamilyBudget, `21-plan-silotage.md`, `24-backlog-reste-a-faire.md`)
+
+[#MFB-POIN-INT-020]
+==== MFB-POIN-INT-020 — Verrouillage et transaction autour de la modification atomique
+
+Le composition root est responsable de garantir que les adaptateurs de persistance de ce silo
+(`JpaBankStore`, et l'implémentation de `BankImportModifier`) ne sont invoqués qu'après prise du
+verrou de mutation dédié (`MutationSilo.BANK_POINTAGE`) et à l'intérieur d'une transaction déjà
+ouverte (`TransactionRunner`) : ce silo ne porte lui-même aucun verrou ni aucune annotation
+transactionnelle (voir MFB-POIN-INT-012).
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt), tests de
+`BankImportCommandService` et du câblage du verrou de mutation.
+
+Amont:: SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Contrat de build et de distribution
+
+[#MFB-POIN-INT-021]
+==== MFB-POIN-INT-021 — Coordonnées Maven publiées
+
+Le silo est consommé par coordonnées Maven (`groupId com.moe.myfamilybudget`, `artifactId
+bank-pointage-api`/`bank-pointage-core`), publiées sur GitHub Packages
+(`https://maven.pkg.github.com/bulldozer27350/myfamilybudget-domain-bank-pointage`) et référencées
+par le BOM applicatif (`back/pom.xml`, property dédiée à ce silo).
+
+Vérification:: Inspection — lecture de `distributionManagement` dans `pom.xml` et de la property
+correspondante dans le BOM applicatif.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-INT-022]
+==== MFB-POIN-INT-022 — Dépendance différenciée selon le module applicatif
+
+Le module `application` ne dépend que de `bank-pointage-api` (contrat, types, interfaces, ports) ;
+seul le composition root (`server`) dépend en plus de `bank-pointage-core` (implémentation), pour
+pouvoir l'instancier, la câbler, et fournir les adaptateurs de persistance.
+
+Vérification:: Inspection — côté MyFamilyBudget (hors périmètre de ce dépôt), lecture de
+`application/pom.xml` et `server/pom.xml`.
+
+Amont:: SILO-154, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-POIN-INT-023]
+==== MFB-POIN-INT-023 — Visibilité JPMS exposée par `bank-pointage-api`
+
+Seuls les packages `com.moe.myfamilybudget.domain.bankpointage.calculation`,
+`com.moe.myfamilybudget.domain.bankpointage.model` et
+`com.moe.myfamilybudget.domain.bankpointage.port` sont exportés par le module JPMS
+`com.moe.myfamilybudget.domain.bankpointage` (`bank-pointage-api`). `bank-pointage-core` ne
+déclare aucun `module-info` (voir `srs.adoc`, MFB-POIN-NRF-005) : ses packages internes (moteurs,
+intégration Enable Banking, persistance) ne sont donc exportés par aucun mécanisme JPMS, leur
+encapsulation reposant sur la convention de câblage (MFB-POIN-INT-006) et l'absence de référence
+depuis `application`.
+
+Vérification:: Inspection — lecture de `bank-pointage-api/src/main/java/module-info.java` et
+absence du fichier équivalent dans `bank-pointage-core`.
+
+Amont:: SILO-154 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Gestion des erreurs et robustesse de l'interface
+
+[#MFB-POIN-INT-024]
+==== MFB-POIN-INT-024 — Exceptions non vérifiées, sans canal d'erreur dédié
+
+Aucune des trois interfaces de service ne déclare d'exception vérifiée (checked). Les anomalies
+d'entrée invalide sont signalées par `IllegalArgumentException` (rôles de colonnes manquants,
+mois ISO absent, ligne budgétaire `null`, ventilations incohérentes — voir `srs.adoc`,
+MFB-POIN-RF-009, RF-013, RF-024, RF-038, RF-039) ; les anomalies de (dé)sérialisation de la
+persistance par `IllegalStateException` (`BankImportDocumentMapper`) ; les anomalies d'accès à
+Enable Banking par `EnableBankingException` (non vérifiée). Aucun modèle du silo ne porte de champ
+de code d'erreur ou de diagnostic : l'`EnableBankingSyncResult.AccountResult.error` (chaîne,
+`null` si succès) est la seule exception, propre à l'isolation par compte (voir `srs.adoc`,
+MFB-POIN-RF-042).
+
+Vérification:: Inspection — revue des signatures et des types de retour de `bank-pointage-api`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-INT-025]
+==== MFB-POIN-INT-025 — Isolation des erreurs par compte lors de la synchronisation
+
+Une erreur de synchronisation d'un compte Enable Banking (réseau, HTTP, certificat, consentement
+expiré) ne remonte jamais telle quelle à l'appelant de `sync()` : elle est portée dans le champ
+`error` du résultat de ce compte (voir `srs.adoc`, MFB-POIN-RF-042), tandis que `sync()` lui-même
+ne lève que si la synchronisation est globalement désactivée (MFB-POIN-RF-041).
+
+Vérification:: Test — même preuve que `srs.adoc`, MFB-POIN-RF-042.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Compatibilité et évolution
+
+[#MFB-POIN-INT-026]
+==== MFB-POIN-INT-026 — Revue de compatibilité sur toute évolution du contrat
+
+Toute modification de forme des modèles de `bank-pointage-api` (ajout, retrait ou changement de
+type d'un champ d'un record, changement de signature d'une des trois interfaces de service ou d'un
+port) est un changement d'interface : elle doit faire l'objet d'une revue de compatibilité binaire
+(`japicmp-maven-plugin`) et d'un incrément de version SemVer conforme à la nature du changement
+(voir `srs.adoc`, MFB-POIN-NRF-008/NRF-010).
+
+Vérification:: Analyse — comparaison binaire outillée (`japicmp-maven-plugin`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-POIN-INT-027]
+==== MFB-POIN-INT-027 — Contrat fermé vis-à-vis des autres silos métier
+
+Aucune évolution de cette interface ne doit introduire de dépendance, directe ou transitive, vers
+un type d'un autre silo métier : toute donnée nécessaire aux trois interfaces de service transite
+exclusivement par les types propres à ce silo, charge à l'application de la traduire (voir
+MFB-POIN-INT-018). Cette fermeture ne s'étend pas à `BankImportModifier` (implémenté par
+l'application elle-même, voir MFB-POIN-INT-014) ni à l'appel sortant vers Enable Banking
+(MFB-POIN-INT-017), qui ne transite par aucun type d'un autre silo MyFamilyBudget.
+
+Vérification:: Analyse — même évidence que `srs.adoc` MFB-POIN-NRF-001 (examen du graphe de
+dépendances), appliquée spécifiquement aux types traversant cette interface.
+
+Amont:: SILO-133, SILO-213 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)

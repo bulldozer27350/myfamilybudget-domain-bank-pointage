@@ -7,6 +7,18 @@ Dépôt autonome contenant les contrats et l'implémentation métier du domaine 
 - **`bank-pointage-api`** : contrats, ports, interfaces de service (import bancaire, pointage). Purement JDK (sans dépendance externe Spring ni JPA).
 - **`bank-pointage-core`** : moteurs de calcul purs, intégration Enable Banking sans Spring, et persistance JPA du document d'import bancaire.
 
+## Documentation des exigences
+
+- [`doc/srs.adoc`](doc/srs.adoc) : exigences fonctionnelles et non fonctionnelles du silo
+  (Software Requirements Specification), chacune avec sa méthode de vérification
+  (Inspection / Analyse / Démonstration / Test).
+- [`doc/irs.adoc`](doc/irs.adoc) : interface entre ce silo et l'application MyFamilyBudget
+  (Interface Requirements Specification).
+
+Ces deux fichiers sont des fragments AsciiDoc sans titre de document, destinés à être concaténés
+(`include::`) dans la documentation consolidée de l'application pour produire un PDF et une
+matrice de traçabilité exigences ↔ tests.
+
 ## Compilation et tests
 
 ```bash
