@@ -55,12 +55,37 @@ public record BankImportModel(
             Integer dateCol,
             Integer labelCol,
             Integer typeCol,
-            Integer amountCol
+            Integer amountCol,
+            List<Integer> extraLabelCols,
+            List<Integer> creditCols,
+            List<Integer> debitCols
     ) {
         public BankColumnMappingModel {
             if (delimiter == null || delimiter.isBlank()) delimiter = ";";
             if (dateFormat == null || dateFormat.isBlank()) dateFormat = "DD/MM/YYYY";
             if (hasHeader == null) hasHeader = true;
+            if (extraLabelCols == null) extraLabelCols = Collections.emptyList();
+            if (creditCols == null) creditCols = Collections.emptyList();
+            if (debitCols == null) debitCols = Collections.emptyList();
+        }
+
+        /**
+         * Constructeur de compatibilité, antérieur à l'ajout du libellé et du montant
+         * répartis sur plusieurs colonnes (crédit/débit) : les appelants existants
+         * continuent de compiler sans modification, et les sauvegardes déjà persistées
+         * en base (JSON) restent lisibles (les champs absents deviennent des listes vides).
+         */
+        public BankColumnMappingModel(
+                String delimiter,
+                String dateFormat,
+                Boolean hasHeader,
+                Integer dateCol,
+                Integer labelCol,
+                Integer typeCol,
+                Integer amountCol
+        ) {
+            this(delimiter, dateFormat, hasHeader, dateCol, labelCol, typeCol, amountCol,
+                    Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
         }
     }
 

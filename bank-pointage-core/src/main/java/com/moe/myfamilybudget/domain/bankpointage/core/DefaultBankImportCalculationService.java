@@ -138,6 +138,20 @@ public final class DefaultBankImportCalculationService implements BankImportCalc
     }
 
     /**
+     * Retourne, dans l'ordre des colonnes, les index de toutes les colonnes portant le rôle
+     * donné (contrairement à {@link List#indexOf}, qui ne renvoie que la première occurrence) :
+     * permet à une même colonne CSV logique (libellé, crédit, débit) d'être répartie sur
+     * plusieurs colonnes physiques selon le relevé bancaire.
+     */
+    private static List<Integer> indicesOfRole(List<String> colRoles, String role) {
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < colRoles.size(); i++) {
+            if (role.equals(colRoles.get(i))) indices.add(i);
+        }
+        return indices;
+    }
+
+    /**
      * Parses an amount string into BigDecimal with RoundingMode.HALF_UP.
      */
     @Override
@@ -271,19 +285,27 @@ public final class DefaultBankImportCalculationService implements BankImportCalc
             throw new IllegalArgumentException("Les rôles de colonnes ne peuvent pas être null.");
         }
         int dateCol = colRoles.indexOf("date");
-        int labelCol = colRoles.indexOf("label");
         int typeCol = colRoles.indexOf("type");
         int amountCol = colRoles.indexOf("amount");
+        List<Integer> labelIndices = indicesOfRole(colRoles, "label");
+        List<Integer> creditCols = indicesOfRole(colRoles, "credit");
+        List<Integer> debitCols = indicesOfRole(colRoles, "debit");
 
-        if (dateCol == -1 || labelCol == -1 || amountCol == -1) {
-            throw new IllegalArgumentException("Il faut au minimum assigner les rôles Date, Libellé et Montant à une colonne.");
+        if (dateCol == -1 || labelIndices.isEmpty() || (amountCol == -1 && creditCols.isEmpty() && debitCols.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "Il faut au minimum assigner les rôles Date, Libellé et Montant (ou Crédit/Débit) à une colonne.");
         }
+        int labelCol = labelIndices.get(0);
+        List<Integer> extraLabelCols = labelIndices.size() > 1
+                ? labelIndices.subList(1, labelIndices.size())
+                : Collections.emptyList();
 
         BankImportModel.BankColumnMappingModel updatedMapping = new BankImportModel.BankColumnMappingModel(
                 mapping != null ? mapping.delimiter() : ";",
                 mapping != null ? mapping.dateFormat() : "DD/MM/YYYY",
                 mapping != null ? mapping.hasHeader() : true,
-                dateCol, labelCol, typeCol >= 0 ? typeCol : null, amountCol
+                dateCol, labelCol, typeCol >= 0 ? typeCol : null, amountCol >= 0 ? amountCol : null,
+                extraLabelCols, creditCols, debitCols
         );
 
         Map<String, Integer> existingCounts = new HashMap<>();
@@ -301,14 +323,27 @@ public final class DefaultBankImportCalculationService implements BankImportCalc
         if (rawRows != null) {
             String dateFormat = mapping != null ? mapping.dateFormat() : "DD/MM/YYYY";
             for (List<String> row : rawRows) {
-                if (dateCol >= row.size() || labelCol >= row.size() || amountCol >= row.size()) continue;
+                if (dateCol >= row.size()) continue;
 
                 String dateISO = parseDateWithFormat(row.get(dateCol), dateFormat);
                 if (dateISO == null) continue;
 
-                String label = row.get(labelCol) != null ? row.get(labelCol).trim() : "";
-                String type = (typeCol >= 0 && typeCol < row.size()) ? row.get(typeCol).trim() : "";
-                BigDecimal amount = parseAmountText(row.get(amountCol));
+                String label = labelIndices.stream()
+                        .filter(c -> c < row.size() && row.get(c) != null)
+                        .map(c -> row.get(c).trim())
+                        .filter(s -> !s.isEmpty())
+                        .collect(Collectors.joining(" "));
+                String type = (typeCol >= 0 && typeCol < row.size() && row.get(typeCol) != null) ? row.get(typeCol).trim() : "";
+                BigDecimal amount = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+                if (amountCol >= 0 && amountCol < row.size()) {
+                    amount = amount.add(parseAmountText(row.get(amountCol)));
+                }
+                for (int creditCol : creditCols) {
+                    if (creditCol < row.size()) amount = amount.add(parseAmountText(row.get(creditCol)).abs());
+                }
+                for (int debitCol : debitCols) {
+                    if (debitCol < row.size()) amount = amount.subtract(parseAmountText(row.get(debitCol)).abs());
+                }
 
                 BankImportModel.BankTransactionModel t = new BankImportModel.BankTransactionModel(
                         java.util.UUID.randomUUID().toString().substring(0, 8),
