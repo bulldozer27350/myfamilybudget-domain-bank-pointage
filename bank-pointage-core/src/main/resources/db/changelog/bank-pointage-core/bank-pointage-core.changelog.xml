@@ -35,4 +35,180 @@
         </createTable>
     </changeSet>
 
+    <!--
+        Migration du stockage de l'import bancaire : bank_import_document (document JSON unique,
+        R-01-lot-b ci-dessus) vers un schema relationnel, pour permettre le filtrage/tri/pagination
+        cote SQL (ecran de categorisation) sans tout charger en memoire navigateur/serveur a chaque
+        appel. Plan en etapes (voir areas/bank-pointage-relational-migration.md) :
+          1. bank-reloc-core-1 a -9 ci-dessous : nouvelles tables, vides, non utilisees par le code
+             applicatif pour le moment. Aucun impact sur bank_import_document, qui reste la source
+             de verite tant que l'etape de bascule (JpaBankStore) n'est pas livree.
+          2. Migration des donnees existantes (JSON -> lignes), via changeSet Java (CustomTaskChange),
+             teste unitairement, pour garantir l'absence de perte de donnees.
+          3. Bascule de JpaBankStore sur ces tables (meme contrat BankReader/BankWriter).
+          4. Nouveau port de lecture paginee/filtree pour l'ecran de categorisation.
+          5. Suppression de bank_import_document, differee (apres periode de confiance en prod).
+
+        Choix de typage : les identifiants (BankTransactionModel.id, etc.) sont generes cote modele
+        Java par UUID.randomUUID().toString().substring(0, 8) par defaut, mais peuvent aussi provenir
+        d'un identifiant externe (import CSV, synchro Enable Banking) : VARCHAR(64) par prudence,
+        plutot que de contraindre a 8 caracteres. Pas de contrainte de cle etrangere vers
+        bank_category.id sur les colonnes category_id : le modele Java utilise une chaine vide ""
+        (et non NULL) pour representer "non categorise" (BankImportModel.BankTransactionModel,
+        constructeur compact), ce qui casserait une FK stricte ; la table bank_category ne contient
+        jamais de categorie d'id vide. Cette conversion "" <-> NULL sera traitee au niveau du mapper
+        lors de l'etape de bascule (etape 3), pas ici.
+    -->
+    <changeSet author="bank-reloc" id="bank-reloc-core-1">
+        <createTable tableName="bank_column_mapping">
+            <column name="id" type="BIGINT">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_column_mapping_pkey"/>
+            </column>
+            <column name="delimiter" type="VARCHAR(8)"/>
+            <column name="date_format" type="VARCHAR(32)"/>
+            <column name="has_header" type="BOOLEAN"/>
+            <column name="date_col" type="INT"/>
+            <column name="label_col" type="INT"/>
+            <column name="type_col" type="INT"/>
+            <column name="amount_col" type="INT"/>
+            <!-- Listes de positions de colonnes CSV, rarement plus de 2-3 valeurs : stockees en
+                 CSV d'entiers plutot que d'ajouter 3 tables de jointure pour une ligne de config
+                 unique (contrairement a bank_transaction, cette table n'a pas vocation a etre
+                 filtree/triee en SQL). -->
+            <column name="extra_label_cols_csv" type="VARCHAR(255)"/>
+            <column name="credit_cols_csv" type="VARCHAR(255)"/>
+            <column name="debit_cols_csv" type="VARCHAR(255)"/>
+        </createTable>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-2">
+        <createTable tableName="bank_category">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_category_pkey"/>
+            </column>
+            <column name="label" type="VARCHAR(255)"/>
+            <column name="kind" type="VARCHAR(32)"/>
+            <column name="compressible" type="VARCHAR(8)"/>
+        </createTable>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-3">
+        <createTable tableName="bank_rule">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_rule_pkey"/>
+            </column>
+            <column name="match_text" type="VARCHAR(255)"/>
+            <column name="category_id" type="VARCHAR(64)"/>
+        </createTable>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-4">
+        <createTable tableName="bank_transaction">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_transaction_pkey"/>
+            </column>
+            <column name="transaction_date" type="VARCHAR(32)"/>
+            <column name="label" type="VARCHAR(512)"/>
+            <column name="type" type="VARCHAR(32)"/>
+            <column name="amount" type="DECIMAL(19,2)"/>
+            <column name="category_id" type="VARCHAR(64)"/>
+        </createTable>
+        <createIndex indexName="bank_transaction_category_id_idx" tableName="bank_transaction">
+            <column name="category_id"/>
+        </createIndex>
+        <createIndex indexName="bank_transaction_date_idx" tableName="bank_transaction">
+            <column name="transaction_date"/>
+        </createIndex>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-5">
+        <createTable tableName="bank_transaction_split">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_transaction_split_pkey"/>
+            </column>
+            <column name="transaction_id" type="VARCHAR(64)">
+                <constraints nullable="false"
+                             foreignKeyName="bank_transaction_split_transaction_fkey"
+                             references="bank_transaction(id)"/>
+            </column>
+            <column name="category_id" type="VARCHAR(64)"/>
+            <column name="amount" type="DECIMAL(19,2)"/>
+            <column name="label" type="VARCHAR(512)"/>
+        </createTable>
+        <createIndex indexName="bank_transaction_split_transaction_id_idx" tableName="bank_transaction_split">
+            <column name="transaction_id"/>
+        </createIndex>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-6">
+        <createTable tableName="bank_pending_operation">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_pending_operation_pkey"/>
+            </column>
+            <column name="operation_date" type="VARCHAR(32)"/>
+            <column name="expected_date" type="VARCHAR(32)"/>
+            <column name="type" type="VARCHAR(16)"/>
+            <column name="ref_number" type="VARCHAR(64)"/>
+            <column name="label" type="VARCHAR(512)"/>
+            <column name="amount" type="DECIMAL(19,2)"/>
+            <column name="category_id" type="VARCHAR(64)"/>
+            <column name="status" type="VARCHAR(16)"/>
+            <column name="linked_tx_id" type="VARCHAR(64)"/>
+            <column name="cleared_date" type="VARCHAR(32)"/>
+            <column name="notes" type="VARCHAR(1024)"/>
+            <column name="budget_line_id" type="VARCHAR(64)"/>
+        </createTable>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-7">
+        <createTable tableName="bank_pending_operation_split">
+            <column name="id" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_pending_operation_split_pkey"/>
+            </column>
+            <column name="pending_operation_id" type="VARCHAR(64)">
+                <constraints nullable="false"
+                             foreignKeyName="bank_pending_op_split_operation_fkey"
+                             references="bank_pending_operation(id)"/>
+            </column>
+            <column name="category_id" type="VARCHAR(64)"/>
+            <column name="amount" type="DECIMAL(19,2)"/>
+            <column name="label" type="VARCHAR(512)"/>
+        </createTable>
+        <createIndex indexName="bank_pending_op_split_operation_id_idx" tableName="bank_pending_operation_split">
+            <column name="pending_operation_id"/>
+        </createIndex>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-8">
+        <createTable tableName="bank_matching">
+            <column name="month" type="VARCHAR(7)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_pkey"/>
+            </column>
+        </createTable>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-9">
+        <createTable tableName="bank_matching_link">
+            <column autoIncrement="true" name="id" type="BIGINT">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_link_pkey"/>
+            </column>
+            <column name="month" type="VARCHAR(7)">
+                <constraints nullable="false"
+                             foreignKeyName="bank_matching_link_month_fkey"
+                             references="bank_matching(month)"/>
+            </column>
+            <column name="budget_line_id" type="VARCHAR(64)"/>
+        </createTable>
+        <createIndex indexName="bank_matching_link_month_idx" tableName="bank_matching_link">
+            <column name="month"/>
+        </createIndex>
+    </changeSet>
+    <changeSet author="bank-reloc" id="bank-reloc-core-10">
+        <createTable tableName="bank_matching_link_tx">
+            <column name="matching_link_id" type="BIGINT">
+                <constraints nullable="false"
+                             foreignKeyName="bank_matching_link_tx_link_fkey"
+                             references="bank_matching_link(id)"/>
+            </column>
+            <column name="tx_id" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex indexName="bank_matching_link_tx_link_id_idx" tableName="bank_matching_link_tx">
+            <column name="matching_link_id"/>
+        </createIndex>
+    </changeSet>
+
 </databaseChangeLog>
