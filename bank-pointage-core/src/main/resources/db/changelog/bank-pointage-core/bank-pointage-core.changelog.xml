@@ -211,4 +211,18 @@
         </createIndex>
     </changeSet>
 
+    <!--
+        Etape 2 du plan (voir commentaire plus haut) : copie, une seule fois, des donnees existantes de
+        bank_import_document vers les tables ci-dessus. bank_import_document n'est ni modifiee ni
+        supprimee par ce changeSet (lecture seule) : elle reste la copie de secours jusqu'a l'etape 5.
+        Implementation en Java (CustomTaskChange) plutot qu'en SQL JSON brut : testable unitairement
+        (garantie de non-perte de donnees exigee pour ce chantier), portable Postgres/H2 sans fonctions
+        JSON specifiques a un moteur. La classe vit dans le composition root (module bootstrap, depot
+        MyFamilyBudget) car c'est le seul module du projet qui depend a la fois de liquibase-core et de
+        bank-pointage-core : voir server/internal/migration/BankImportRelationalMigration.java.
+    -->
+    <changeSet author="bank-reloc" id="bank-reloc-core-11">
+        <customChange class="com.moe.myfamilybudget.server.internal.migration.BankImportRelationalMigration"/>
+    </changeSet>
+
 </databaseChangeLog>
