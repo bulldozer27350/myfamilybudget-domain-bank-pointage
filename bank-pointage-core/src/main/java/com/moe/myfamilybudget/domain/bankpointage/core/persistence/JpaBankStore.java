@@ -1,6 +1,7 @@
 package com.moe.myfamilybudget.domain.bankpointage.core.persistence;
 
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
@@ -12,45 +13,91 @@ import com.moe.myfamilybudget.domain.bankpointage.port.BankSnapshotWriter;
 import com.moe.myfamilybudget.domain.bankpointage.port.BankWriter;
 
 /**
- * Adaptateur JPA du silo Banque/Pointage (SILO-213, lot B) : implemente {@link BankReader}, {@link BankWriter}
- * et {@link BankSnapshotWriter} directement sur la table {@code bank_import_document}, sans passer par le cache
- * global ni par le {@code PersistenceManager}.
+ * Adaptateur JPA du silo Banque/Pointage : implemente {@link BankReader}, {@link BankWriter} et
+ * {@link BankSnapshotWriter} directement sur le schema relationnel introduit par l'etape 1/5 de la
+ * migration (areas/bank-pointage-relational-migration.md, cote projet : {@code bank-reloc-core-1} a
+ * {@code -10}), sans passer par le cache global ni par le {@code PersistenceManager}.
  *
- * <p>Les ecritures ne s'appellent que dans une transaction deja ouverte ({@code TransactionRunner}) et apres la
- * prise du verrou du silo ({@code MutationSilo.BANK_POINTAGE}) par l'appelant : l'adaptateur ne porte ni
- * {@code @Transactional} ni verrou. Chaque ecriture remplace le document par l'import resultant (suppression,
- * {@code flush}, insertion), comme l'ancienne synchronisation du modele global : le {@code flush} est
- * indispensable, Hibernate executant les insertions avant les suppressions. Une erreur de serialisation ou
- * d'ecriture est propagee a l'appelant ({@link IllegalStateException} pour le JSON) : une ecriture en echec ne
- * devient jamais une reussite.
+ * <p><strong>Etape 3/5</strong> : avant cette classe, l'import bancaire etait stocke comme un document JSON
+ * unique ({@code bank_import_document}, voir {@link BankImportDocumentEntity}). Cette table n'est plus lue
+ * ni ecrite a partir d'ici (elle reste en base intacte, comme copie de secours, jusqu'a l'etape 5) ; seule
+ * {@code com.moe.myfamilybudget.server.internal.migration.BankImportRelationalMigration} (depot
+ * MyFamilyBudget, etape 2/5) la lit encore, une seule fois, pour peupler le schema relationnel au moment de
+ * la mise a jour.
  *
- * <p>Lecture : sans document en base, un import vide est restitue (aucun consommateur ne recoit {@code null}) ;
- * une erreur de relecture du JSON est propagee.
+ * <p>Les ecritures ne s'appellent que dans une transaction deja ouverte ({@code TransactionRunner}) et apres
+ * la prise du verrou du silo ({@code MutationSilo.BANK_POINTAGE}) par l'appelant : l'adaptateur ne porte ni
+ * {@code @Transactional} ni verrou. Chaque ecriture remplace l'integralite des tables par l'import resultant
+ * (suppression puis insertion, dans un ordre qui respecte les contraintes de cle etrangere entre tables :
+ * enfants avant parents a la suppression, parents avant enfants a l'insertion). Pas de relation JPA
+ * {@code @OneToMany}/{@code @ManyToOne} entre entites : la lecture charge systematiquement l'integralite de
+ * chaque table et recompose les listes en memoire ({@link BankRelationalMapper}), ce qui evite tout risque
+ * de requetes N+1 — le cas d'usage n'est jamais une navigation entite par entite, mais toujours un
+ * chargement ou un remplacement complet.
+ *
+ * <p>Lecture : sans ligne en base, un import vide est restitue (aucun consommateur ne recoit {@code null}).
  *
  * <p>Apres chaque ecriture, un {@link BankImportMutatedEvent} est publie : l'ecoute apres commit declenche le
- * controle automatique des notifications, comme le faisait {@code BudgetMutatedEvent}.
+ * controle automatique des notifications, comme avant l'etape 3.
  */
 @Component
 public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter {
 
-    private final BankImportDocumentRepository bankImportDocumentRepository;
+    private final BankColumnMappingRepository columnMappingRepository;
+    private final BankCategoryRepository categoryRepository;
+    private final BankRuleRepository ruleRepository;
+    private final BankTransactionRepository transactionRepository;
+    private final BankTransactionSplitRepository transactionSplitRepository;
+    private final BankPendingOperationRepository pendingOperationRepository;
+    private final BankPendingOperationSplitRepository pendingOperationSplitRepository;
+    private final BankMatchingRepository matchingRepository;
+    private final BankMatchingLinkRepository matchingLinkRepository;
+    private final BankMatchingLinkTxRepository matchingLinkTxRepository;
     private final ApplicationEventPublisher eventPublisher;
 
-    public JpaBankStore(BankImportDocumentRepository bankImportDocumentRepository,
-                        ApplicationEventPublisher eventPublisher) {
-        this.bankImportDocumentRepository = bankImportDocumentRepository;
+    public JpaBankStore(
+            BankColumnMappingRepository columnMappingRepository,
+            BankCategoryRepository categoryRepository,
+            BankRuleRepository ruleRepository,
+            BankTransactionRepository transactionRepository,
+            BankTransactionSplitRepository transactionSplitRepository,
+            BankPendingOperationRepository pendingOperationRepository,
+            BankPendingOperationSplitRepository pendingOperationSplitRepository,
+            BankMatchingRepository matchingRepository,
+            BankMatchingLinkRepository matchingLinkRepository,
+            BankMatchingLinkTxRepository matchingLinkTxRepository,
+            ApplicationEventPublisher eventPublisher) {
+        this.columnMappingRepository = columnMappingRepository;
+        this.categoryRepository = categoryRepository;
+        this.ruleRepository = ruleRepository;
+        this.transactionRepository = transactionRepository;
+        this.transactionSplitRepository = transactionSplitRepository;
+        this.pendingOperationRepository = pendingOperationRepository;
+        this.pendingOperationSplitRepository = pendingOperationSplitRepository;
+        this.matchingRepository = matchingRepository;
+        this.matchingLinkRepository = matchingLinkRepository;
+        this.matchingLinkTxRepository = matchingLinkTxRepository;
         this.eventPublisher = eventPublisher;
     }
 
     @Override
     public BankImportModel getBankImport() {
-        BankImportModel model = bankImportDocumentRepository.findFirstByOrderByIdAsc()
-                .map(BankImportDocumentMapper::toModel)
+        BankColumnMappingEntity mapping = columnMappingRepository.findById(BankColumnMappingEntity.SINGLETON_ID)
                 .orElse(null);
-        return model != null ? model : emptyImport();
+        return BankRelationalMapper.toModel(
+                mapping,
+                categoryRepository.findAll(),
+                ruleRepository.findAll(),
+                transactionRepository.findAll(),
+                transactionSplitRepository.findAll(),
+                pendingOperationRepository.findAll(),
+                pendingOperationSplitRepository.findAll(),
+                matchingRepository.findAll(),
+                matchingLinkRepository.findAll(),
+                matchingLinkTxRepository.findAll());
     }
 
-    /** Un import {@code null} est ignore (aucune ecriture, aucun evenement), comme l'ancienne mutation. */
+    /** Un import {@code null} est ignore (aucune ecriture, aucun evenement), comme avant l'etape 3. */
     @Override
     public void updateBankImport(BankImportModel bankImport) {
         if (bankImport == null) {
@@ -60,32 +107,86 @@ public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter 
         publishMutated("updateBankImport");
     }
 
-    /** SILO-119 (lot B1) : import de l'import bancaire ({@code null} accepte : aucun document). */
+    /** Import de l'import bancaire ({@code null} accepte : tables vides). */
     @Override
     public void replace(BankImportModel bankImport) {
         rewrite(bankImport);
         publishMutated("replace");
     }
 
-    /** SILO-119 (lot B1) : remise a vide de l'import bancaire (un document vide est ecrit). */
+    /** Remise a vide de l'import bancaire (tables videes, rien n'est reinsere). */
     @Override
     public void reset() {
         rewrite(emptyImport());
         publishMutated("reset");
     }
 
-    /** Remplace le contenu de la table par {@code bankImport} ({@code null} : table vide). */
+    /** Remplace le contenu des tables par {@code bankImport} ({@code null} : tables vides). */
     private void rewrite(BankImportModel bankImport) {
-        bankImportDocumentRepository.deleteAll();
-        bankImportDocumentRepository.flush();
+        deleteAllRows();
         if (bankImport == null) {
             return;
         }
-        bankImportDocumentRepository.save(BankImportDocumentMapper.toEntity(bankImport));
+        insertAllRows(bankImport);
+        // Par prudence (comme l'ancien code, qui devait forcer l'ordre suppression/insertion) : garantit
+        // que les insertions encore en attente (entites a identifiant assigne, non genere, que Hibernate
+        // peut differer jusqu'au flush) sont bien ecrites avant de rendre la main a l'appelant.
+        columnMappingRepository.flush();
+    }
+
+    /** Ordre obligatoire : les tables enfants (contrainte de cle etrangere) avant leurs parents. */
+    private void deleteAllRows() {
+        matchingLinkTxRepository.deleteAllInBatch();
+        matchingLinkRepository.deleteAllInBatch();
+        matchingRepository.deleteAllInBatch();
+        pendingOperationSplitRepository.deleteAllInBatch();
+        pendingOperationRepository.deleteAllInBatch();
+        transactionSplitRepository.deleteAllInBatch();
+        transactionRepository.deleteAllInBatch();
+        ruleRepository.deleteAllInBatch();
+        categoryRepository.deleteAllInBatch();
+        columnMappingRepository.deleteAllInBatch();
+    }
+
+    /** Ordre obligatoire : les tables parents avant leurs enfants (contrainte de cle etrangere). */
+    private void insertAllRows(BankImportModel bankImport) {
+        columnMappingRepository.save(BankRelationalMapper.toColumnMappingEntity(bankImport.columnMapping()));
+        categoryRepository.saveAll(BankRelationalMapper.toCategoryEntities(bankImport.categories()));
+        ruleRepository.saveAll(BankRelationalMapper.toRuleEntities(bankImport.rules()));
+        transactionRepository.saveAll(BankRelationalMapper.toTransactionEntities(bankImport.transactions()));
+        transactionSplitRepository.saveAll(
+                BankRelationalMapper.toTransactionSplitEntities(bankImport.transactions()));
+        pendingOperationRepository.saveAll(
+                BankRelationalMapper.toPendingOperationEntities(bankImport.pendingOperations()));
+        pendingOperationSplitRepository.saveAll(
+                BankRelationalMapper.toPendingOperationSplitEntities(bankImport.pendingOperations()));
+        matchingRepository.saveAll(BankRelationalMapper.toMatchingEntities(bankImport.matchings()));
+        insertMatchingLinksAndTransactions(bankImport);
+    }
+
+    /**
+     * Les liens de rapprochement ont un identifiant genere (necessaire avant de pouvoir creer les lignes
+     * {@code bank_matching_link_tx} correspondantes) : chaque lien est sauvegarde individuellement pour
+     * recuperer son identifiant, puis ses transactions associees sont accumulees et sauvegardees en bloc a
+     * la fin (volume attendu faible : quelques dizaines de mois de rapprochement, pas de souci de
+     * performance a iterer ainsi).
+     */
+    private void insertMatchingLinksAndTransactions(BankImportModel bankImport) {
+        List<BankMatchingLinkTxEntity> allLinkTxRows = new ArrayList<>();
+        for (BankImportModel.MatchingModel matching : bankImport.matchings()) {
+            for (BankImportModel.MatchingLinkModel link : matching.links()) {
+                BankMatchingLinkEntity savedLink = matchingLinkRepository.save(
+                        new BankMatchingLinkEntity(matching.month(), link.budgetLineId()));
+                for (String txId : link.txIds()) {
+                    allLinkTxRows.add(new BankMatchingLinkTxEntity(savedLink.getId(), txId));
+                }
+            }
+        }
+        matchingLinkTxRepository.saveAll(allLinkTxRows);
     }
 
     private static BankImportModel emptyImport() {
-        return new BankImportModel(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+        return new BankImportModel(List.of(), List.of(), List.of());
     }
 
     private void publishMutated(String mutationKind) {

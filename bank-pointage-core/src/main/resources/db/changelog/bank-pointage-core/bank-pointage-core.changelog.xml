@@ -225,4 +225,20 @@
         <customChange class="com.moe.myfamilybudget.server.internal.migration.BankImportRelationalMigration"/>
     </changeSet>
 
+    <!--
+        Correctif d'oubli de l'etape 1 : bank_matching_link_tx (bank-reloc-core-10) n'avait pas de cle
+        primaire (simple table de jointure matching_link_id/tx_id). Necessaire pour la mapper en entite JPA
+        a l'etape 3 (chaque @Entity a besoin d'un @Id). Additif et sans risque : la table est, au pire,
+        deja peuplee par la migration de l'etape 2 (bank-reloc-core-11 ci-dessus), jamais avant ; ajouter
+        une colonne auto-incrementee ne touche pas les colonnes existantes et n'a pas besoin d'etre
+        reference par l'INSERT de la migration, qui ne la nomme pas.
+    -->
+    <changeSet author="bank-reloc" id="bank-reloc-core-12">
+        <addColumn tableName="bank_matching_link_tx">
+            <column name="id" type="BIGINT" autoIncrement="true">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_link_tx_pkey"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>
