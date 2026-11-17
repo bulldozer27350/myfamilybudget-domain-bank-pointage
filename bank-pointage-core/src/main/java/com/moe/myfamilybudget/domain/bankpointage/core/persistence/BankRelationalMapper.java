@@ -88,7 +88,8 @@ public final class BankRelationalMapper {
                 entity.getCategoryId());
     }
 
-    private static BankImportModel.BankTransactionModel toTransactionModel(BankTransactionEntity entity,
+    /** Public (plutôt que privé) : réutilisée par {@code JpaBankStore.findTransactions} (étape 4). */
+    public static BankImportModel.BankTransactionModel toTransactionModel(BankTransactionEntity entity,
             List<BankTransactionSplitEntity> splits) {
         return new BankImportModel.BankTransactionModel(entity.getId(), entity.getTransactionDate(),
                 entity.getLabel(), entity.getType(), entity.getAmount(), entity.getCategoryId(),

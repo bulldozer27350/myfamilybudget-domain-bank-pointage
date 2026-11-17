@@ -2,14 +2,22 @@ package com.moe.myfamilybudget.domain.bankpointage.core.persistence;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 
 import com.moe.myfamilybudget.domain.bankpointage.model.BankImportModel;
 import com.moe.myfamilybudget.domain.bankpointage.model.BankImportMutatedEvent;
+import com.moe.myfamilybudget.domain.bankpointage.model.BankTransactionPage;
 import com.moe.myfamilybudget.domain.bankpointage.port.BankReader;
 import com.moe.myfamilybudget.domain.bankpointage.port.BankSnapshotWriter;
+import com.moe.myfamilybudget.domain.bankpointage.port.BankTransactionPageReader;
 import com.moe.myfamilybudget.domain.bankpointage.port.BankWriter;
 
 /**
@@ -39,9 +47,14 @@ import com.moe.myfamilybudget.domain.bankpointage.port.BankWriter;
  *
  * <p>Apres chaque ecriture, un {@link BankImportMutatedEvent} est publie : l'ecoute apres commit declenche le
  * controle automatique des notifications, comme avant l'etape 3.
+ *
+ * <p><strong>Etape 4/5</strong> : {@link BankTransactionPageReader#findTransactions} complete {@link BankReader}
+ * (qui reste un chargement complet) par une lecture paginee et filtree par etat de categorisation, pour
+ * l'ecran de categorisation : seule la page demandee est chargee en memoire (serveur comme navigateur),
+ * via l'index {@code bank_transaction_category_id_idx} (changeSet {@code bank-reloc-core-4}).
  */
 @Component
-public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter {
+public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter, BankTransactionPageReader {
 
     private final BankColumnMappingRepository columnMappingRepository;
     private final BankCategoryRepository categoryRepository;
@@ -95,6 +108,37 @@ public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter 
                 matchingRepository.findAll(),
                 matchingLinkRepository.findAll(),
                 matchingLinkTxRepository.findAll());
+    }
+
+    /**
+     * Etape 4/5 : lecture paginee et filtree par etat de categorisation, pour l'ecran de categorisation.
+     * Charge uniquement les repartitions ({@code bank_transaction_split}) des transactions de la page
+     * (pas l'integralite de la table), via {@link BankTransactionSplitRepository#findByTransactionIdIn}.
+     */
+    @Override
+    public BankTransactionPage findTransactions(Boolean categorized, int page, int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "transactionDate"));
+        Page<BankTransactionEntity> entityPage;
+        if (categorized == null) {
+            entityPage = transactionRepository.findAll(pageable);
+        } else if (categorized) {
+            entityPage = transactionRepository.findByCategoryIdIsNotNull(pageable);
+        } else {
+            entityPage = transactionRepository.findByCategoryIdIsNull(pageable);
+        }
+
+        List<String> transactionIds = entityPage.getContent().stream().map(BankTransactionEntity::getId).toList();
+        Map<String, List<BankTransactionSplitEntity>> splitsByTransactionId = transactionSplitRepository
+                .findByTransactionIdIn(transactionIds).stream()
+                .collect(Collectors.groupingBy(BankTransactionSplitEntity::getTransactionId));
+
+        List<BankImportModel.BankTransactionModel> transactions = entityPage.getContent().stream()
+                .map(tx -> BankRelationalMapper.toTransactionModel(tx,
+                        splitsByTransactionId.getOrDefault(tx.getId(), List.of())))
+                .toList();
+
+        return new BankTransactionPage(transactions, entityPage.getNumber(), entityPage.getSize(),
+                entityPage.getTotalElements(), entityPage.getTotalPages());
     }
 
     /** Un import {@code null} est ignore (aucune ecriture, aucun evenement), comme avant l'etape 3. */
