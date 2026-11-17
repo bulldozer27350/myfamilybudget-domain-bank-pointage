@@ -5,12 +5,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.moe.myfamilybudget.domain.bankpointage.model.BankImportModel;
 import com.moe.myfamilybudget.domain.bankpointage.model.BankImportMutatedEvent;
@@ -67,6 +71,9 @@ public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter,
     private final BankMatchingLinkRepository matchingLinkRepository;
     private final BankMatchingLinkTxRepository matchingLinkTxRepository;
     private final ApplicationEventPublisher eventPublisher;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public JpaBankStore(
             BankColumnMappingRepository columnMappingRepository,
@@ -168,6 +175,10 @@ public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter,
     /** Remplace le contenu des tables par {@code bankImport} ({@code null} : tables vides). */
     private void rewrite(BankImportModel bankImport) {
         deleteAllRows();
+        if (entityManager != null && TransactionSynchronizationManager.isActualTransactionActive()) {
+            entityManager.flush();
+            entityManager.clear();
+        }
         if (bankImport == null) {
             return;
         }
@@ -175,7 +186,11 @@ public class JpaBankStore implements BankReader, BankWriter, BankSnapshotWriter,
         // Par prudence (comme l'ancien code, qui devait forcer l'ordre suppression/insertion) : garantit
         // que les insertions encore en attente (entites a identifiant assigne, non genere, que Hibernate
         // peut differer jusqu'au flush) sont bien ecrites avant de rendre la main a l'appelant.
-        columnMappingRepository.flush();
+        if (entityManager != null && TransactionSynchronizationManager.isActualTransactionActive()) {
+            entityManager.flush();
+        } else {
+            columnMappingRepository.flush();
+        }
     }
 
     /** Ordre obligatoire : les tables enfants (contrainte de cle etrangere) avant leurs parents. */

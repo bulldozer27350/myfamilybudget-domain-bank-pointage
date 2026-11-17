@@ -185,12 +185,15 @@
                 <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_link_pkey"/>
             </column>
             <column name="month" type="VARCHAR(7)">
-                <constraints nullable="false"
-                             foreignKeyName="bank_matching_link_month_fkey"
-                             references="bank_matching(month)"/>
+                <constraints nullable="false"/>
             </column>
             <column name="budget_line_id" type="VARCHAR(64)"/>
         </createTable>
+        <addForeignKeyConstraint baseTableName="bank_matching_link"
+                                 baseColumnNames="month"
+                                 constraintName="bank_matching_link_month_fkey"
+                                 referencedTableName="bank_matching"
+                                 referencedColumnNames="month"/>
         <createIndex indexName="bank_matching_link_month_idx" tableName="bank_matching_link">
             <column name="month"/>
         </createIndex>
