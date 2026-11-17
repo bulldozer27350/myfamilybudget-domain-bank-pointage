@@ -174,7 +174,7 @@
     </changeSet>
     <changeSet author="bank-reloc" id="bank-reloc-core-8">
         <createTable tableName="bank_matching">
-            <column name="month" type="VARCHAR(7)">
+            <column name="matching_month" type="VARCHAR(7)">
                 <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_pkey"/>
             </column>
         </createTable>
@@ -184,18 +184,18 @@
             <column autoIncrement="true" name="id" type="BIGINT">
                 <constraints nullable="false" primaryKey="true" primaryKeyName="bank_matching_link_pkey"/>
             </column>
-            <column name="month" type="VARCHAR(7)">
+            <column name="matching_month" type="VARCHAR(7)">
                 <constraints nullable="false"/>
             </column>
             <column name="budget_line_id" type="VARCHAR(64)"/>
         </createTable>
         <addForeignKeyConstraint baseTableName="bank_matching_link"
-                                 baseColumnNames="month"
+                                 baseColumnNames="matching_month"
                                  constraintName="bank_matching_link_month_fkey"
                                  referencedTableName="bank_matching"
-                                 referencedColumnNames="month"/>
+                                 referencedColumnNames="matching_month"/>
         <createIndex indexName="bank_matching_link_month_idx" tableName="bank_matching_link">
-            <column name="month"/>
+            <column name="matching_month"/>
         </createIndex>
     </changeSet>
     <changeSet author="bank-reloc" id="bank-reloc-core-10">

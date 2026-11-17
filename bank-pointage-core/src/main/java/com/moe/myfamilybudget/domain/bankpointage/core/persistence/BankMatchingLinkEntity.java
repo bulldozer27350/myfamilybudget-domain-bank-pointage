@@ -20,7 +20,7 @@ public class BankMatchingLinkEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "month")
+    @Column(name = "matching_month")
     private String month;
 
     @Column(name = "budget_line_id")

@@ -13,7 +13,7 @@ import org.springframework.data.domain.Persistable;
 public class BankMatchingEntity implements Persistable<String> {
 
     @Id
-    @Column(name = "month")
+    @Column(name = "matching_month")
     private String month;
 
     public BankMatchingEntity() {
