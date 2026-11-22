@@ -4,6 +4,27 @@ Toutes les versions publiées de ce dépôt respectent la spécification [SemVer
 
 ---
 
+## [0.1.1-SNAPSHOT] - En cours
+
+### Type de release
+**Développement en cours** (reprise après la version `0.1.0`, aucune release stable produite
+depuis)
+
+### Résumé
+Reprise du développement en continu ; aucun changement de code ni de comportement métier pour
+l'instant : `bank-pointage-api` et `bank-pointage-core` restent identiques à la version `0.1.0`.
+
+### Changements par composant
+- **`pom.xml`, `bank-pointage-api/pom.xml`, `bank-pointage-core/pom.xml`** : reprise du
+  développement en continu après la release `0.1.0`, version bumpée vers `0.1.1-SNAPSHOT`
+  conformément à l'étape 4 du processus de release documenté dans `README.md`.
+
+### Rétro-compatibilité & Compatibilité binaire
+Aucun changement de code : compatibilité binaire et fonctionnelle strictement identique à
+`0.1.0`. Ce patch est de gestion de version uniquement.
+
+---
+
 ## [0.1.0] - 2026-11-22
 
 ### Type de release
