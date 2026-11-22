@@ -4,40 +4,58 @@ Toutes les versions publiées de ce dépôt respectent la spécification [SemVer
 
 ---
 
-## [0.0.2-SNAPSHOT] - En cours
+## [0.1.0] - 2026-11-22
 
 ### Type de release
-**Développement en cours** (reprise après la version initiale `0.0.1`, aucune release stable
-produite depuis)
+**MINEURE** (nouvelles capacités rétro-compatibles : persistance relationnelle de l'import
+bancaire, pagination serveur des transactions, import CSV multi-colonnes)
 
 ### Résumé
-Ajout de la documentation d'exigences du silo Pointage Banque, sans aucun changement de code ni de
-comportement métier : `bank-pointage-api` et `bank-pointage-core` restent identiques à la version
-`0.0.1`.
+Documentation d'exigences (SRS/IRS) déjà publiée en `0.0.2-SNAPSHOT`, suivie de la bascule
+complète du stockage de l'import bancaire d'un document JSON unique (`bank_import_document`)
+vers un schéma relationnel (étapes 1 à 4 du plan de migration), de corrections de compatibilité
+H2/PostgreSQL découvertes lors de cette bascule, et d'un assouplissement de l'import CSV
+(libellé et montant répartis sur plusieurs colonnes). Aucun changement de contrat observable
+pour les appelants existants (`BankReader`/`BankWriter`/`BankSnapshotWriter` inchangés) ; le
+nouveau port `BankTransactionPageReader` est une addition pure.
 
 ### Changements par composant
-- **`doc/srs.adoc`** (nouveau) : Software Requirements Specification du silo — 46 exigences
-  fonctionnelles (`MFB-POIN-RF-001` à `MFB-POIN-RF-046`) et 14 exigences non fonctionnelles
-  (`MFB-POIN-NRF-001` à `MFB-POIN-NRF-014`), chacune avec identifiant, titre, texte, note d'usage
-  le cas échéant, méthode de vérification (Inspection / Analyse / Démonstration / Test) et
-  traçabilité amont. Rédigé comme un fragment AsciiDoc sans titre de document, destiné à être
-  concaténé (`include::`) au SRS consolidé de l'application MyFamilyBudget.
-- **`doc/irs.adoc`** (nouveau) : Interface Requirements Specification spécifiant l'interaction
-  entre l'application MyFamilyBudget et ce silo — nature différenciée de l'interface selon les
-  trois services exposés, persistance JPA et verrouillage propres au silo, port
-  `BankImportModifier` implémenté par l'application (sens inversé), événement
-  `BankImportMutatedEvent`, intégration externe Enable Banking hors du périmètre applicatif, et
-  règles de compatibilité (27 exigences `MFB-POIN-INT-001` à `MFB-POIN-INT-027`, chacune avec sa
-  méthode de vérification). Même format de fragment AsciiDoc que `srs.adoc`, destiné à la même
-  concaténation applicative.
-- **`README.md`** : ajout d'un pointeur vers `doc/srs.adoc` et `doc/irs.adoc`.
-- **`pom.xml`, `bank-pointage-api/pom.xml`, `bank-pointage-core/pom.xml`** : reprise du
-  développement en continu après la release `0.0.1`, version bumpée vers `0.0.2-SNAPSHOT`
-  conformément à l'étape 4 du processus de release documenté dans `README.md`.
+- **`doc/srs.adoc`, `doc/irs.adoc`, `README.md`** : documentation d'exigences du silo (46 RF,
+  14 NRF, 27 exigences d'interface), déjà livrée en `0.0.2-SNAPSHOT`, sans changement de code.
+- **Import CSV (`bank-pointage-api`/`bank-pointage-core`)** : `BankImportModel.BankColumnMappingModel`
+  gagne `extraLabelCols`, `creditCols`, `debitCols` (additif, constructeur de compatibilité
+  conservé) ; `DefaultBankImportCalculationService.importTransactions()` concatène désormais
+  toutes les colonnes de rôle `label` et agrège Montant et/ou Crédit/Débit, au lieu de ne
+  retenir que la première colonne de chaque rôle. Validation assouplie : accepte Montant OU
+  Crédit/Débit. Message d'erreur de validation inchangé (rétro-compatibilité du test existant).
+- **Schéma relationnel de l'import bancaire (`bank-pointage-core`)** :
+  - Étape 1 : nouvelles tables Liquibase vides (`bank_column_mapping`, `bank_category`,
+    `bank_rule`, `bank_transaction`/`bank_transaction_split`, `bank_pending_operation`/`_split`,
+    `bank_matching`/`_link`/`_link_tx`), sans impact sur le code applicatif.
+  - Étape 2 : changeSet `bank-reloc-core-11` déclenchant la copie unique des données existantes
+    de `bank_import_document` vers les nouvelles tables (implémentation `CustomTaskChange` côté
+    dépôt `MyFamilyBudget`, seul module dépendant à la fois de `liquibase-core` et de ce silo).
+  - Étape 3 : `JpaBankStore` lit et écrit désormais directement les tables relationnelles (10
+    entités JPA + repositories, `BankRelationalMapper`) au lieu du document JSON unique, à
+    contrat `BankReader`/`BankWriter`/`BankSnapshotWriter` strictement inchangé ;
+    `bank_import_document` n'est plus lue ni écrite depuis ce silo (conservée en base comme
+    copie de secours).
+  - Étape 4 : nouveau port `BankTransactionPageReader` (addition) pour la lecture paginée et
+    filtrée (catégorisé/non catégorisé) des transactions, sans charger la table entière.
+  - Corrections découvertes en cours de bascule : nom de colonne SQL `month` renommé en
+    `matching_month` (mot réservé provoquant une erreur de démarrage sous H2), ajout d'une clé
+    primaire auto-incrémentée sur `bank_matching_link_tx` (oubli de l'étape 1), et flush/clear
+    de l'`EntityManager` dans `JpaBankStore` entre la purge et la réinsertion des tables pour
+    éviter des collisions de session Hibernate.
+- **`pom.xml`, `bank-pointage-api/pom.xml`, `bank-pointage-core/pom.xml`** : version stable
+  `0.1.0` (plus de suffixe `-SNAPSHOT`).
 
 ### Rétro-compatibilité & Compatibilité binaire
-Aucun changement de code : compatibilité binaire et fonctionnelle strictement identique à `0.0.1`.
-Ce patch est documentaire et de gestion de version uniquement.
+- Aucun changement de contrat observable : `BankReader`, `BankWriter`, `BankSnapshotWriter`
+  inchangés ; `BankTransactionPageReader` est une addition pure.
+- `bank_import_document` reste intacte en base (copie de secours) jusqu'à l'étape 5 (suppression),
+  non incluse dans cette version.
+- Rétro-compatibilité binaire garantie dans la plage `[0.1.0, 0.2.0)`.
 
 ---
 
